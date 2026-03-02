@@ -51,7 +51,7 @@ This repo comes with a standalone script that reproduces the official Gaussian S
 
 ```bash
 cd examples
-pip install -r requirements.txt
+pip install -r requirements.txt --no-build-isolation
 # download mipnerf_360 benchmark data
 python datasets/download_dataset.py
 # run batch evaluation
