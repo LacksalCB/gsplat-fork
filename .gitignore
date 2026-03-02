@@ -1,0 +1,6 @@
+scripts/slurm/outputs/*
+examples/data/360_v2/*
+examples/results/*
+**/__pycache__/*
+
+*.nsys-rep
