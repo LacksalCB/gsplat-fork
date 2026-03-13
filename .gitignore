@@ -3,4 +3,6 @@ examples/data/360_v2/*
 examples/results/*
 **/__pycache__/*
 
+cuda_12.1.0_530.30.02_linux.run
+
 *.nsys-rep
