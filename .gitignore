@@ -4,3 +4,12 @@ examples/results/*
 **/__pycache__/*
 
 *.nsys-rep
+*.qdstrm
+*.sqlite
+*.egg-info
+core.*
+
+splat/.nfs*
+gsplat/csrc.so
+
+build/
