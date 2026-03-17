@@ -3,11 +3,13 @@
 module load gcc 
 module load python/3.12.3
 module load cuda
+module load nsight-systems
 
-source /bigtemp/rhm4nj/gpu_arch/project/gsplat-env/bin/activate
+# source /bigtemp/rhm4nj/gpu_arch/project/gsplat-env/bin/activate
 
 echo "Entered VM"
 pwd
+echo 'which python (setup):'
 which python
 
 pip install --upgrade pip
