@@ -733,7 +733,7 @@ class Runner:
     
         # 3. Profiling Configuration
         # Capture a 10-step window to keep .nsys-rep file size manageable
-        profile_start, profile_stop = 100, 1100
+        profile_start, profile_stop = 0, 30000
         global_tic = time.time()
         pbar = tqdm.tqdm(range(init_step, max_steps))
     
