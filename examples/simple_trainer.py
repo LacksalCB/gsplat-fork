@@ -40,6 +40,47 @@ from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
 
+import torch.cuda.profiler as profiler
+import torch.cuda.nvtx as nvtx
+
+# AI slop mockup
+class GSCacheManager:
+    def __init__(self, full_xyz, device, pool_size=1_000_000):
+        self.all_xyz = full_xyz.to("cpu").pin_memory() # Keep full set on CPU
+        self.device = device
+        self.pool_size = pool_size
+        
+        # GPU Resident Pool (Pre-allocate)
+        self.gpu_xyz = torch.zeros((pool_size, 3), device=device)
+        self.resident_indices = torch.full((len(full_xyz),), -1, dtype=torch.long) # CPU map
+        self.next_slot = 0
+
+    def prefetch_halo(self, current_pose, velocity, radius=1.5):
+        """Predicts next location and pushes data to GPU asynchronously."""
+        predicted_pose = current_pose + velocity
+        
+        # 1. Find indices in the Halo (simplified distance check)
+        dist = torch.norm(self.all_xyz - predicted_pose, dim=1)
+        halo_mask = dist < radius
+        target_indices = torch.where(halo_mask)[0]
+
+        # 2. Filter for only NEW data not already in pool
+        new_to_fetch = target_indices[self.resident_indices[target_indices] == -1]
+
+        if len(new_to_fetch) > 0:
+            # 3. Asynchronous transfer (non_blocking=True is key!)
+            # This fills the pre-allocated GPU buffer
+            num_new = len(new_to_fetch)
+            slots = torch.arange(self.next_slot, self.next_slot + num_new) % self.pool_size
+            
+            # THE LATENCY KILLER: Move data without stopping the CPU
+            self.gpu_xyz[slots] = self.all_xyz[new_to_fetch].to(self.device, non_blocking=True)
+            
+            # Update map
+            self.resident_indices[new_to_fetch] = slots
+            self.next_slot = (self.next_slot + num_new) % self.pool_size
+            
+        return target_indices
 
 @dataclass
 class Config:
@@ -660,6 +701,130 @@ class Runner:
 
         return render_colors, render_alphas, info
 
+
+    def train(self):
+        cfg = self.cfg
+        device = self.device
+        world_rank = self.world_rank
+        world_size = self.world_size
+    
+        # 1. Setup Logging & Schedulers
+        if world_rank == 0:
+            with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
+                yaml.dump(vars(cfg), f)
+    
+        max_steps = cfg.max_steps
+        init_step = 0
+        
+        # Scheduling logic restored from original
+        schedulers = [
+            torch.optim.lr_scheduler.ExponentialLR(
+                self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
+            ),
+        ]
+        # ... (Include pose_opt/post_processing schedulers here as in original)
+    
+        # 2. Data Loader Setup
+        trainloader = torch.utils.data.DataLoader(
+            self.trainset, batch_size=cfg.batch_size, shuffle=True,
+            num_workers=4, persistent_workers=True, pin_memory=True,
+        )
+        trainloader_iter = iter(trainloader)
+    
+        # 3. Profiling Configuration
+        # Capture a 10-step window to keep .nsys-rep file size manageable
+        profile_start, profile_stop = 100, 1100
+        global_tic = time.time()
+        pbar = tqdm.tqdm(range(init_step, max_steps))
+    
+        for step in pbar:
+            # Trigger Nsight Profiler API
+            if step == profile_start:
+                profiler.start()
+    
+            # START NVTX ITERATION BLOCK
+            nvtx.range_push(f"Iteration_{step}")
+    
+            # --- DATA LOADING ---
+            nvtx.range_push("Data_Loading")
+            try:
+                data = next(trainloader_iter)
+            except StopIteration:
+                trainloader_iter = iter(trainloader)
+                data = next(trainloader_iter)
+    
+            camtoworlds = data["camtoworld"].to(device)
+            Ks = data["K"].to(device)
+            pixels = data["image"].to(device) / 255.0
+            image_ids = data["image_id"].to(device)
+            height, width = pixels.shape[1:3]
+            nvtx.range_pop()
+    
+            # --- FORWARD PASS (RASTERIZATION) ---
+            nvtx.range_push("Forward_Rasterize")
+            sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
+            renders, alphas, info = self.rasterize_splats(
+                camtoworlds=camtoworlds, Ks=Ks, width=width, height=height,
+                sh_degree=sh_degree_to_use, near_plane=cfg.near_plane, 
+                far_plane=cfg.far_plane, image_ids=image_ids,
+                render_mode="RGB"
+            )
+            colors = renders
+            nvtx.range_pop()
+    
+            # --- STRATEGY PRE-BACKWARD (Accumulate Stats) ---
+            nvtx.range_push("Strategy_Pre_Backward")
+            self.cfg.strategy.step_pre_backward(
+                params=self.splats, optimizers=self.optimizers,
+                state=self.strategy_state, step=step, info=info,
+            )
+            nvtx.range_pop()
+    
+            # --- LOSS & BACKWARD ---
+            nvtx.range_push("Loss_and_Backward")
+            l1loss = F.l1_loss(colors, pixels)
+            # Assuming fused_ssim is imported
+            ssimloss = 1.0 - fused_ssim(colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2))
+            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+            
+            for optimizer in self.optimizers.values():
+                optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            nvtx.range_pop()
+    
+            # --- OPTIMIZER STEP ---
+            nvtx.range_push("Optimizer_Update")
+            for optimizer in self.optimizers.values():
+                optimizer.step()
+            for scheduler in schedulers:
+                scheduler.step()
+            nvtx.range_pop()
+    
+            # --- STRATEGY POST-BACKWARD (Densification/MCMC) ---
+            nvtx.range_push("Strategy_Post_Backward")
+            if isinstance(self.cfg.strategy, DefaultStrategy):
+                self.cfg.strategy.step_post_backward(
+                    params=self.splats, optimizers=self.optimizers,
+                    state=self.strategy_state, step=step, info=info, packed=cfg.packed,
+                )
+            elif isinstance(self.cfg.strategy, MCMCStrategy):
+                self.cfg.strategy.step_post_backward(
+                    params=self.splats, optimizers=self.optimizers,
+                    state=self.strategy_state, step=step, info=info, 
+                    lr=schedulers[0].get_last_lr()[0],
+                )
+            nvtx.range_pop()
+    
+            # END NVTX ITERATION BLOCK
+            nvtx.range_pop() 
+    
+            # Stop Profiler and break early for benchmark efficiency
+            if step == profile_stop:
+                profiler.stop()
+                print(f"Profiling complete. Captured steps {profile_start} to {profile_stop}.")
+                break
+    
+    """
     def train(self):
         cfg = self.cfg
         device = self.device
@@ -1041,7 +1206,9 @@ class Runner:
                 )
                 # Update the scene.
                 self.viewer.update(step, num_train_rays_per_step)
+    """
 
+    # comment
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
         """Entry for evaluation."""

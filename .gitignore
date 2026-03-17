@@ -3,4 +3,7 @@ examples/data/360_v2/*
 examples/results/*
 **/__pycache__/*
 
+*.nfs*
+.venv/
+gsplat/csrc.so
 *.nsys-rep
