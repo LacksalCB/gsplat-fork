@@ -31,7 +31,6 @@ echo "Env: $ENV_DIR"
 echo "Reusing existing environment: $ENV_DIR"
 source "$ENV_DIR/bin/activate"
 
-pip install imageio
 echo 'which python (after):'
 which python
 
@@ -39,6 +38,14 @@ echo 'working in dir:'
 pwd
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+echo 'Running nsys profile \
+    --trace={trace} \
+    --sample={sample} \
+    --force-overwrite={force_overwrite} \
+    --output={profile_output} \
+    bash {script_path} \
+    {script_args}'
 
 nsys profile \
     --trace={trace} \

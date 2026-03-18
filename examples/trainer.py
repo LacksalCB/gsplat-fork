@@ -6,7 +6,7 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256"
 
 #Temp issue
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import time
 from collections import defaultdict, OrderedDict
 from dataclasses import dataclass, field
