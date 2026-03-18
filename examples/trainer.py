@@ -49,7 +49,6 @@ from nerfview import CameraState, RenderTabState, apply_float_colormap
 import torch.cuda.profiler as profiler
 import torch.cuda.nvtx as nvtx
 
-# AI slop mockup
 class GSCacheManager:
     def __init__(self, vram_thresh_gb=18.5):
         self.limit = vram_thresh_gb * 1024 * 8
@@ -774,7 +773,9 @@ class Runner:
         profile_start, profile_stop = 0, 30000
         global_tic = time.time()
         pbar = tqdm.tqdm(range(init_step, max_steps))
-    
+   
+        optimizer_stride = 4
+
         for step in pbar:
             # Trigger Nsight Profiler API
             if step == profile_start:
@@ -860,20 +861,22 @@ class Runner:
             # Assuming fused_ssim is imported
             ssimloss = 1.0 - fused_ssim(colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2))
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+            lose = loss/optimizer_stride
             
-            for optimizer in self.optimizers.values():
-                optimizer.zero_grad(set_to_none=True)
             loss.backward()
             nvtx.range_pop()
     
             # --- OPTIMIZER STEP ---
-            nvtx.range_push("Optimizer_Update")
-            for optimizer in self.optimizers.values():
-                optimizer.step()
-            for scheduler in schedulers:
-                scheduler.step()
-            nvtx.range_pop()
-    
+            if (step+1) % optimizer_stride == 0:
+                nvtx.range_push("Optimizer_Update")
+                for optimizer in self.optimizers.values():
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                for scheduler in schedulers:
+                    scheduler.step()
+                nvtx.range_pop()
+                
+
             # --- STRATEGY POST-BACKWARD (Densification/MCMC) ---
             nvtx.range_push("Strategy_Post_Backward")
         
@@ -888,8 +891,6 @@ class Runner:
                 current_count = self.splats['means'].shape[0]
                 
                 if current_count < 4_500_000:
-                    # PURGE CACHE BEFORE SPIKE
-                    # This clears the LRU tensors to make room for the densification copy
                     self.cache_manager.purge_all()
                     
                     strategy.step_post_backward(
@@ -900,10 +901,7 @@ class Runner:
                         info=info, 
                         packed=cfg.packed
                     )
-                else:
-                    # Optional: Print a warning if we skip densification
-                    if step % 1000 == 0:
-                        print(f"Skipping densification at step {step}: count {current_count} exceeds safety limit.")
+
             nvtx.range_pop()
     
             # END NVTX ITERATION BLOCK
