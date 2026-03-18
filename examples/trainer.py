@@ -51,28 +51,50 @@ import torch.cuda.nvtx as nvtx
 
 class GSCacheManager:
     def __init__(self, vram_thresh_gb=18.5):
-        self.limit = vram_thresh_gb * 1024 * 8
-        self.cache = {}
-
+        self.limit_bytes = int(vram_thresh_gb * (1024 ** 3))
+        # OrderedDict maintains insertion/access order — front = LRU, back = MRU.
+        # Both move_to_end() and popitem() are O(1) via its internal doubly linked list.
+        self.cache = OrderedDict()
+        self.entry_sizes = {}   # view_id -> bytes, for O(1) size tracking
+        self.current_bytes = 0
         self.transfer_stream = torch.cuda.Stream()
+
+    def _entry_bytes(self, entry):
+        return sum(
+            v.element_size() * v.numel()
+            for v in entry.values()
+            if isinstance(v, torch.Tensor)
+        )
 
     def get_cache(self, view_id, compute_func):
         if view_id in self.cache:
+            # Cache hit — move to back (most recently used end)
+            self.cache.move_to_end(view_id)
             entry = self.cache[view_id]
-            # Move to main device using the transfer stream
             with torch.cuda.stream(self.transfer_stream):
                 for k, v in entry.items():
                     if isinstance(v, torch.Tensor):
-                        # non_blocking=True allows the CPU to keep running
                         entry[k] = v.to("cuda", non_blocking=True)
             return entry
 
+        # Cache miss — compute the entry
         new_entry = compute_func()
+        entry_bytes = self._entry_bytes(new_entry)
+
+        # Evict LRU entries (front of OrderedDict) until there is room
+        while self.current_bytes + entry_bytes > self.limit_bytes and self.cache:
+            lru_id, _ = self.cache.popitem(last=False)
+            self.current_bytes -= self.entry_sizes.pop(lru_id)
+
         self.cache[view_id] = new_entry
+        self.entry_sizes[view_id] = entry_bytes
+        self.current_bytes += entry_bytes
         return new_entry
 
     def purge_all(self):
         self.cache.clear()
+        self.entry_sizes.clear()
+        self.current_bytes = 0
         torch.cuda.empty_cache()
 
 @dataclass
@@ -587,6 +609,61 @@ class Runner:
         self._gaussians_frozen = True
         print("[Distillation] Gaussian parameters frozen")
 
+    @torch.no_grad()
+    def frustum_cull(
+        self,
+        camtoworlds: Tensor,  # [C, 4, 4]
+        Ks: Tensor,            # [C, 3, 3]
+        width: int,
+        height: int,
+        near_plane: float = 0.01,
+    ) -> Tensor:
+        """Return a boolean mask [N] — True for Gaussians visible in at least one camera.
+
+        Uses the conservative radius approach from the CLM paper (§5.1):
+        project each Gaussian center into camera space, compute a pixel-space
+        radius from the largest scale, and keep the Gaussian if the bounding
+        circle overlaps the image for any camera in the batch.
+        """
+        means = self.splats["means"]          # [N, 3]
+        scales = torch.exp(self.splats["scales"])  # [N, 3]
+        max_scale = scales.max(dim=-1).values  # [N]
+
+        # viewmats: [C, 4, 4]  (world-to-camera)
+        viewmats = torch.linalg.inv(camtoworlds)  # [C, 4, 4]
+        R = viewmats[:, :3, :3]  # [C, 3, 3]
+        t = viewmats[:, :3, 3]   # [C, 3]
+
+        # p_cam: [C, N, 3]
+        p_cam = (R @ means.T).permute(0, 2, 1) + t.unsqueeze(1)  # [C, N, 3]
+        z = p_cam[..., 2]  # [C, N]
+
+        # Only consider Gaussians in front of the near plane
+        valid_depth = z > near_plane  # [C, N]
+
+        # Project to image space
+        fx = Ks[:, 0, 0].unsqueeze(1)  # [C, 1]
+        fy = Ks[:, 1, 1].unsqueeze(1)
+        cx = Ks[:, 0, 2].unsqueeze(1)
+        cy = Ks[:, 1, 2].unsqueeze(1)
+
+        z_safe = z.clamp(min=1e-6)
+        u = fx * p_cam[..., 0] / z_safe + cx  # [C, N]
+        v = fy * p_cam[..., 1] / z_safe + cy  # [C, N]
+
+        # Conservative pixel radius from the largest Gaussian axis
+        f_max = torch.max(fx, fy)  # [C, 1]
+        r = f_max * max_scale.unsqueeze(0) / z_safe  # [C, N]
+
+        in_frustum = (
+            valid_depth
+            & (u + r > 0) & (u - r < width)
+            & (v + r > 0) & (v - r < height)
+        )  # [C, N]
+
+        # Keep a Gaussian if it's in frustum for ANY camera
+        return in_frustum.any(dim=0)  # [N]
+
     def rasterize_splats(
         self,
         camtoworlds: Tensor,
@@ -600,6 +677,7 @@ class Runner:
         camera_idcs: Optional[Tensor] = None,
         exposure: Optional[Tensor] = None,
         external_buffers=None,
+        cull_mask: Optional[Tensor] = None,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         means = self.splats["means"]  # [N, 3]
@@ -608,6 +686,12 @@ class Runner:
         quats = self.splats["quats"]  # [N, 4]
         scales = torch.exp(self.splats["scales"])  # [N, 3]
         opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+
+        if cull_mask is not None:
+            means = means[cull_mask]
+            quats = quats[cull_mask]
+            scales = scales[cull_mask]
+            opacities = opacities[cull_mask]
 
         image_ids = kwargs.pop("image_ids", None)
         if external_buffers is not None:
@@ -621,16 +705,20 @@ class Runner:
 
 
         if self.cfg.app_opt:
+            features = self.splats["features"] if cull_mask is None else self.splats["features"][cull_mask]
+            splat_colors = self.splats["colors"] if cull_mask is None else self.splats["colors"][cull_mask]
             colors = self.app_module(
-                features=self.splats["features"],
+                features=features,
                 embed_ids=image_ids,
                 dirs=means[None, :, :] - camtoworlds[:, None, :3, 3],
                 sh_degree=kwargs.pop("sh_degree", self.cfg.sh_degree),
             )
-            colors = colors + self.splats["colors"]
+            colors = colors + splat_colors
             colors = torch.sigmoid(colors)
         else:
-            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+            sh0 = self.splats["sh0"] if cull_mask is None else self.splats["sh0"][cull_mask]
+            shN = self.splats["shN"] if cull_mask is None else self.splats["shN"][cull_mask]
+            colors = torch.cat([sh0, shN], 1)  # [N, K, 3]
 
         if rasterize_mode is None:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
@@ -825,7 +913,17 @@ class Runner:
             # --- FORWARD PASS (ALWAYS FRESH) ---
             nvtx.range_push("Forward_Rasterize")
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
-            
+
+            # Pre-rendering frustum culling (CLM paper §5.1): drop Gaussians
+            # that are outside the view frustum before rasterization.
+            cull_mask = self.frustum_cull(
+                camtoworlds=camtoworlds,
+                Ks=Ks,
+                width=width,
+                height=height,
+                near_plane=cfg.near_plane,
+            )
+
             # We call this FRESH so 'info' has active gradients for densification
             renders, alphas, info = self.rasterize_splats(
                 camtoworlds=camtoworlds,
@@ -840,7 +938,8 @@ class Runner:
                 masks=masks,
                 camera_idcs=camera_idcs,
                 exposure=exposure,
-                external_buffers=None # NEVER use cached output buffers here
+                external_buffers=None, # NEVER use cached output buffers here
+                cull_mask=cull_mask,
             )
             
             colors = renders
@@ -858,12 +957,14 @@ class Runner:
             # --- LOSS & BACKWARD ---
             nvtx.range_push("Loss_and_Backward")
             l1loss = F.l1_loss(colors, pixels)
-            # Assuming fused_ssim is imported
             ssimloss = 1.0 - fused_ssim(colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2))
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
-            lose = loss/optimizer_stride
-            
-            loss.backward()
+            if cfg.opacity_reg > 0.0:
+                loss += cfg.opacity_reg * torch.sigmoid(self.splats["opacities"]).mean()
+            if cfg.scale_reg > 0.0:
+                loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
+
+            (loss / optimizer_stride).backward()
             nvtx.range_pop()
     
             # --- OPTIMIZER STEP ---
@@ -887,20 +988,21 @@ class Runner:
                 step % strategy.refine_every == 0
             )
             
-            if is_refinement_step:
-                current_count = self.splats['means'].shape[0]
+            ### Hopefully no need for this
+            # if is_refinement_step:
+            #     current_count = self.splats['means'].shape[0]
                 
-                if current_count < 4_500_000:
-                    self.cache_manager.purge_all()
+            #     if current_count < 4_500_000:
+            #         self.cache_manager.purge_all()
                     
-                    strategy.step_post_backward(
-                        params=self.splats, 
-                        optimizers=self.optimizers,
-                        state=self.strategy_state, 
-                        step=step, 
-                        info=info, 
-                        packed=cfg.packed
-                    )
+            #         strategy.step_post_backward(
+            #             params=self.splats, 
+            #             optimizers=self.optimizers,
+            #             state=self.strategy_state, 
+            #             step=step, 
+            #             info=info, 
+            #             packed=cfg.packed
+            #         )
 
             nvtx.range_pop()
     
