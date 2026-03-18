@@ -50,31 +50,47 @@ import torch.cuda.profiler as profiler
 import torch.cuda.nvtx as nvtx
 
 # AI slop mockup
-class GSCacheManager:
-    def __init__(self, vram_thresh_gb=18.5):
-        self.limit = vram_thresh_gb * 1024 * 8
-        self.cache = {}
+from collections import OrderedDict
+import torch
 
-        self.transfer_stream = torch.cuda.Stream()
+class GPUCacheManager:
+    def __init__(self, max_cache_size=8, device="cuda"):
+        self.cache = OrderedDict()
+        self.max_cache_size = max_cache_size
+        self.device = device
 
-    def get_cache(self, view_id, compute_func):
-        if view_id in self.cache:
-            entry = self.cache[view_id]
-            # Move to main device using the transfer stream
-            with torch.cuda.stream(self.transfer_stream):
-                for k, v in entry.items():
-                    if isinstance(v, torch.Tensor):
-                        # non_blocking=True allows the CPU to keep running
-                        entry[k] = v.to("cuda", non_blocking=True)
-            return entry
+    def _move_to_gpu(self, data):
+        """Move tensors to GPU ONCE when caching"""
+        return {
+            "camtoworld": data["camtoworld"].to(self.device, non_blocking=True),
+            "K": data["K"].to(self.device, non_blocking=True),
+            "pixels": data["image"].to(self.device, non_blocking=True) / 255.0,
+            "image_id": data["image_id"],  # keep as-is (likely int)
+        }
 
-        new_entry = compute_func()
-        self.cache[view_id] = new_entry
-        return new_entry
+    def get_cache(self, key, builder_fn):
+        # Cache hit
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
 
-    def purge_all(self):
+        # Cache miss → build (already on GPU!)
+        entry = builder_fn()
+
+        self.cache[key] = entry
+        self.cache.move_to_end(key)
+
+        # LRU eviction
+        if len(self.cache) > self.max_cache_size:
+            old_key, old_val = self.cache.popitem(last=False)
+            del old_val
+
+        return entry
+
+    def clear(self):
         self.cache.clear()
-        torch.cuda.empty_cache()
+        torch.cuda.empty_cache()  # optional but useful
+
 
 @dataclass
 class Config:
@@ -743,8 +759,8 @@ class Runner:
         world_size = self.world_size
     
         # Setup Cache
-        if not hasattr(self, 'cache_manager'):
-            self.cache_manager = GSCacheManager(vram_thresh_gb=18.5)
+        if not hasattr(self, 'cache_manager'): # IMPORTANT: ensure this cache DOES NOT use transfer streams 
+            self.cache_manager = GPUCacheManager()
 
         # 1. Setup Logging & Schedulers
         if world_rank == 0:
@@ -763,10 +779,14 @@ class Runner:
         # ... (Include pose_opt/post_processing schedulers here as in original)
     
         # 2. Data Loader Setup
-        trainloader = torch.utils.data.DataLoader(
-            self.trainset, batch_size=cfg.batch_size, shuffle=True,
-            num_workers=4, persistent_workers=True, pin_memory=True,
-        )
+        trainloader = torch.utils.data.DataLoader( 
+            self.trainset, 
+            batch_size=cfg.batch_size, 
+            shuffle=True, 
+            num_workers=4, 
+            persistent_workers=True, 
+            pin_memory=True, # harmless but no longer critical 
+        ) 
         trainloader_iter = iter(trainloader)
     
         # 3. Profiling Configuration
@@ -792,21 +812,26 @@ class Runner:
             
             view_id = data["image_id"][0].item()
 
-            # CACHE ONLY THE RAW INPUTS (Images, Cameras, Masks)
-            # This avoids slow Disk -> CPU -> GPU transfers on subsequent epochs
-            cached_data = self.cache_manager.get_cache(
-                view_id,
-                lambda: {
-                    "pixels": data["image"].to(device) / 255.0,
-                    "camtoworlds": data["camtoworld"].to(device),
-                    "Ks": data["K"].to(device),
-                    "image_ids": data["image_id"].to(device),
-                    "camera_idcs": data["camera_idx"].to(device),
-                    "masks": data.get("mask").to(device) if data.get("mask") is not None else None,
-                    "exposure": data.get("exposure").to(device) if "exposure" in data else None
-                }
-            )
-            
+            def build_cache_entry(): 
+                return { # Move ONCE here → stays on GPU forever (until evicted) 
+                        "pixels": data["image"].to(device, non_blocking=True) / 255.0, 
+                        "camtoworlds": data["camtoworld"].to(device, non_blocking=True), 
+                        "Ks": data["K"].to(device, non_blocking=True), 
+                        "image_ids": data["image_id"].to(device, 
+                        non_blocking=True), "camera_idcs": 
+                        data["camera_idx"].to(device, 
+                        non_blocking=True), # Optional fields 
+                        "masks": data["mask"].to(device, non_blocking=True) 
+                        if data.get("mask") is not None else None, 
+
+                        "exposure": data["exposure"].to(device, non_blocking=True) 
+                        if "exposure" in data else None, 
+                } 
+
+            cached_data = self.cache_manager.get_cache( 
+                    view_id, 
+                    build_cache_entry
+            )            
             # Pull inputs from cache
             pixels = cached_data["pixels"]
             camtoworlds = cached_data["camtoworlds"]
@@ -818,14 +843,12 @@ class Runner:
 
             height, width = pixels.shape[1:3]
             
-            torch.cuda.current_stream().wait_stream(self.cache_manager.transfer_stream)
             nvtx.range_pop()
 
             # --- FORWARD PASS (ALWAYS FRESH) ---
             nvtx.range_push("Forward_Rasterize")
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
             
-            # We call this FRESH so 'info' has active gradients for densification
             renders, alphas, info = self.rasterize_splats(
                 camtoworlds=camtoworlds,
                 Ks=Ks,
@@ -848,10 +871,15 @@ class Runner:
     
             # --- STRATEGY PRE-BACKWARD (Accumulate Stats) ---
             nvtx.range_push("Strategy_Pre_Backward")
-            self.cfg.strategy.step_pre_backward(
-                params=self.splats, optimizers=self.optimizers,
-                state=self.strategy_state, step=step, info=info,
+
+            self.cfg.strategy.step_pre_backward( 
+                    params=self.splats, 
+                    optimizers=self.optimizers, 
+                    state=self.strategy_state, 
+                    step=step, 
+                    info=info, 
             )
+
             nvtx.range_pop()
     
             # --- LOSS & BACKWARD ---
@@ -890,8 +918,8 @@ class Runner:
                 if current_count < 4_500_000:
                     # PURGE CACHE BEFORE SPIKE
                     # This clears the LRU tensors to make room for the densification copy
-                    self.cache_manager.purge_all()
-                    
+                    self.cache_manager.clear()
+
                     strategy.step_post_backward(
                         params=self.splats, 
                         optimizers=self.optimizers,
@@ -915,391 +943,6 @@ class Runner:
                 print(f"Profiling complete. Captured steps {profile_start} to {profile_stop}.")
                 break
     
-    """
-    def train(self):
-        cfg = self.cfg
-        device = self.device
-        world_rank = self.world_rank
-        world_size = self.world_size
-
-        # Dump cfg.
-        if world_rank == 0:
-            with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
-                yaml.dump(vars(cfg), f)
-
-        max_steps = cfg.max_steps
-        init_step = 0
-
-        schedulers = [
-            # means has a learning rate schedule, that end at 0.01 of the initial value
-            torch.optim.lr_scheduler.ExponentialLR(
-                self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
-            ),
-        ]
-        if cfg.pose_opt:
-            # pose optimization has a learning rate schedule
-            schedulers.append(
-                torch.optim.lr_scheduler.ExponentialLR(
-                    self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-                )
-            )
-        # Post-processing module has a learning rate schedule
-        if cfg.post_processing == "bilateral_grid":
-            # Linear warmup + exponential decay
-            schedulers.append(
-                torch.optim.lr_scheduler.ChainedScheduler(
-                    [
-                        torch.optim.lr_scheduler.LinearLR(
-                            self.post_processing_optimizers[0],
-                            start_factor=0.01,
-                            total_iters=1000,
-                        ),
-                        torch.optim.lr_scheduler.ExponentialLR(
-                            self.post_processing_optimizers[0],
-                            gamma=0.01 ** (1.0 / max_steps),
-                        ),
-                    ]
-                )
-            )
-        elif cfg.post_processing == "ppisp":
-            ppisp_schedulers = self.post_processing_module.create_schedulers(
-                self.post_processing_optimizers,
-                max_optimization_iters=max_steps,
-            )
-            schedulers.extend(ppisp_schedulers)
-
-        trainloader = torch.utils.data.DataLoader(
-            self.trainset,
-            batch_size=cfg.batch_size,
-            shuffle=True,
-            num_workers=4,
-            persistent_workers=True,
-            pin_memory=True,
-        )
-        trainloader_iter = iter(trainloader)
-
-        # Training loop.
-        global_tic = time.time()
-        pbar = tqdm.tqdm(range(init_step, max_steps))
-        for step in pbar:
-            if not cfg.disable_viewer:
-                while self.viewer.state == "paused":
-                    time.sleep(0.01)
-                self.viewer.lock.acquire()
-                tic = time.time()
-
-            # Freeze Gaussians when PPISP controller distillation starts
-            if (
-                cfg.post_processing == "ppisp"
-                and cfg.ppisp_use_controller
-                and cfg.ppisp_controller_distillation
-                and step >= cfg.ppisp_controller_activation_num_steps
-            ):
-                self.freeze_gaussians()
-
-            try:
-                data = next(trainloader_iter)
-            except StopIteration:
-                trainloader_iter = iter(trainloader)
-                data = next(trainloader_iter)
-
-            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
-            Ks = data["K"].to(device)  # [1, 3, 3]
-            pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
-            num_train_rays_per_step = (
-                pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
-            )
-            image_ids = data["image_id"].to(device)
-            masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
-            exposure = (
-                data["exposure"].to(device) if "exposure" in data else None
-            )  # [B,]
-            if cfg.depth_loss:
-                points = data["points"].to(device)  # [1, M, 2]
-                depths_gt = data["depths"].to(device)  # [1, M]
-
-            height, width = pixels.shape[1:3]
-
-            if cfg.pose_noise:
-                camtoworlds = self.pose_perturb(camtoworlds, image_ids)
-
-            if cfg.pose_opt:
-                camtoworlds = self.pose_adjust(camtoworlds, image_ids)
-
-            # sh schedule
-            sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
-
-            # forward
-            renders, alphas, info = self.rasterize_splats(
-                camtoworlds=camtoworlds,
-                Ks=Ks,
-                width=width,
-                height=height,
-                sh_degree=sh_degree_to_use,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                image_ids=image_ids,
-                render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                masks=masks,
-                frame_idcs=image_ids,
-                camera_idcs=data["camera_idx"].to(device),
-                exposure=exposure,
-            )
-            if renders.shape[-1] == 4:
-                colors, depths = renders[..., 0:3], renders[..., 3:4]
-            else:
-                colors, depths = renders, None
-
-            if cfg.random_bkgd:
-                bkgd = torch.rand(1, 3, device=device)
-                colors = colors + bkgd * (1.0 - alphas)
-
-            self.cfg.strategy.step_pre_backward(
-                params=self.splats,
-                optimizers=self.optimizers,
-                state=self.strategy_state,
-                step=step,
-                info=info,
-            )
-
-            # loss
-            l1loss = F.l1_loss(colors, pixels)
-            ssimloss = 1.0 - fused_ssim(
-                colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
-            )
-            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
-            if cfg.depth_loss:
-                # query depths from depth map
-                points = torch.stack(
-                    [
-                        points[:, :, 0] / (width - 1) * 2 - 1,
-                        points[:, :, 1] / (height - 1) * 2 - 1,
-                    ],
-                    dim=-1,
-                )  # normalize to [-1, 1]
-                grid = points.unsqueeze(2)  # [1, M, 1, 2]
-                depths = F.grid_sample(
-                    depths.permute(0, 3, 1, 2), grid, align_corners=True
-                )  # [1, 1, M, 1]
-                depths = depths.squeeze(3).squeeze(1)  # [1, M]
-                # calculate loss in disparity space
-                disp = torch.where(depths > 0.0, 1.0 / depths, torch.zeros_like(depths))
-                disp_gt = 1.0 / depths_gt  # [1, M]
-                depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
-                loss += depthloss * cfg.depth_lambda
-            if cfg.post_processing == "bilateral_grid":
-                post_processing_reg_loss = 10 * total_variation_loss(
-                    self.post_processing_module.grids
-                )
-                loss += post_processing_reg_loss
-            elif cfg.post_processing == "ppisp":
-                post_processing_reg_loss = (
-                    self.post_processing_module.get_regularization_loss()
-                )
-                loss += post_processing_reg_loss
-
-            # regularizations
-            if cfg.opacity_reg > 0.0:
-                loss += cfg.opacity_reg * torch.sigmoid(self.splats["opacities"]).mean()
-            if cfg.scale_reg > 0.0:
-                loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
-
-            loss.backward()
-
-            desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
-            if cfg.depth_loss:
-                desc += f"depth loss={depthloss.item():.6f}| "
-            if cfg.pose_opt and cfg.pose_noise:
-                # monitor the pose error if we inject noise
-                pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
-                desc += f"pose err={pose_err.item():.6f}| "
-            pbar.set_description(desc)
-
-            # write images (gt and render)
-            # if world_rank == 0 and step % 800 == 0:
-            #     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
-            #     canvas = canvas.reshape(-1, *canvas.shape[2:])
-            #     imageio.imwrite(
-            #         f"{self.render_dir}/train_rank{self.world_rank}.png",
-            #         (canvas * 255).astype(np.uint8),
-            #     )
-
-            if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
-                self.writer.add_scalar("train/loss", loss.item(), step)
-                self.writer.add_scalar("train/l1loss", l1loss.item(), step)
-                self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
-                self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
-                self.writer.add_scalar("train/mem", mem, step)
-                if cfg.depth_loss:
-                    self.writer.add_scalar("train/depthloss", depthloss.item(), step)
-                if cfg.post_processing is not None:
-                    self.writer.add_scalar(
-                        "train/post_processing_reg_loss",
-                        post_processing_reg_loss.item(),
-                        step,
-                    )
-                if cfg.tb_save_image:
-                    canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
-                    canvas = canvas.reshape(-1, *canvas.shape[2:])
-                    self.writer.add_image("train/render", canvas, step)
-                self.writer.flush()
-
-            # save checkpoint before updating the model
-            if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
-                stats = {
-                    "mem": mem,
-                    "ellipse_time": time.time() - global_tic,
-                    "num_GS": len(self.splats["means"]),
-                }
-                print("Step: ", step, stats)
-                with open(
-                    f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
-                    "w",
-                ) as f:
-                    json.dump(stats, f)
-                data = {"step": step, "splats": self.splats.state_dict()}
-                if cfg.pose_opt:
-                    if world_size > 1:
-                        data["pose_adjust"] = self.pose_adjust.module.state_dict()
-                    else:
-                        data["pose_adjust"] = self.pose_adjust.state_dict()
-                if cfg.app_opt:
-                    if world_size > 1:
-                        data["app_module"] = self.app_module.module.state_dict()
-                    else:
-                        data["app_module"] = self.app_module.state_dict()
-                if self.post_processing_module is not None:
-                    data["post_processing"] = self.post_processing_module.state_dict()
-                torch.save(
-                    data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
-                )
-            if (
-                step in [i - 1 for i in cfg.ply_steps] or step == max_steps - 1
-            ) and cfg.save_ply:
-
-                if self.cfg.app_opt:
-                    # eval at origin to bake the appeareance into the colors
-                    rgb = self.app_module(
-                        features=self.splats["features"],
-                        embed_ids=None,
-                        dirs=torch.zeros_like(self.splats["means"][None, :, :]),
-                        sh_degree=sh_degree_to_use,
-                    )
-                    rgb = rgb + self.splats["colors"]
-                    rgb = torch.sigmoid(rgb).squeeze(0).unsqueeze(1)
-                    sh0 = rgb_to_sh(rgb)
-                    shN = torch.empty([sh0.shape[0], 0, 3], device=sh0.device)
-                else:
-                    sh0 = self.splats["sh0"]
-                    shN = self.splats["shN"]
-
-                means = self.splats["means"]
-                scales = self.splats["scales"]
-                quats = self.splats["quats"]
-                opacities = self.splats["opacities"]
-                export_splats(
-                    means=means,
-                    scales=scales,
-                    quats=quats,
-                    opacities=opacities,
-                    sh0=sh0,
-                    shN=shN,
-                    format="ply",
-                    save_to=f"{self.ply_dir}/point_cloud_{step}.ply",
-                )
-
-            # Turn Gradients into Sparse Tensor before running optimizer
-            if cfg.sparse_grad:
-                assert cfg.packed, "Sparse gradients only work with packed mode."
-                gaussian_ids = info["gaussian_ids"]
-                for k in self.splats.keys():
-                    grad = self.splats[k].grad
-                    if grad is None or grad.is_sparse:
-                        continue
-                    self.splats[k].grad = torch.sparse_coo_tensor(
-                        indices=gaussian_ids[None],  # [1, nnz]
-                        values=grad[gaussian_ids],  # [nnz, ...]
-                        size=self.splats[k].size(),  # [N, ...]
-                        is_coalesced=len(Ks) == 1,
-                    )
-
-            if cfg.visible_adam:
-                gaussian_cnt = self.splats.means.shape[0]
-                if cfg.packed:
-                    visibility_mask = torch.zeros_like(
-                        self.splats["opacities"], dtype=bool
-                    )
-                    visibility_mask.scatter_(0, info["gaussian_ids"], 1)
-                else:
-                    visibility_mask = (info["radii"] > 0).all(-1).any(0)
-
-            # optimize
-            for optimizer in self.optimizers.values():
-                if cfg.visible_adam:
-                    optimizer.step(visibility_mask)
-                else:
-                    optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.pose_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.app_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.post_processing_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for scheduler in schedulers:
-                scheduler.step()
-
-            # Run post-backward steps after backward and optimizer
-            if isinstance(self.cfg.strategy, DefaultStrategy):
-                self.cfg.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    packed=cfg.packed,
-                )
-            elif isinstance(self.cfg.strategy, MCMCStrategy):
-                self.cfg.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    lr=schedulers[0].get_last_lr()[0],
-                )
-            else:
-                assert_never(self.cfg.strategy)
-
-            # eval the full set
-            if step in [i - 1 for i in cfg.eval_steps]:
-                self.eval(step)
-                self.render_traj(step)
-
-            # run compression
-            if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
-                self.run_compression(step=step)
-
-            if not cfg.disable_viewer:
-                self.viewer.lock.release()
-                num_train_steps_per_sec = 1.0 / (max(time.time() - tic, 1e-10))
-                num_train_rays_per_sec = (
-                    num_train_rays_per_step * num_train_steps_per_sec
-                )
-                # Update the viewer state.
-                self.viewer.render_tab_state.num_train_rays_per_sec = (
-                    num_train_rays_per_sec
-                )
-                # Update the scene.
-                self.viewer.update(step, num_train_rays_per_step)
-    """
-
-    # comment
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
         """Entry for evaluation."""
