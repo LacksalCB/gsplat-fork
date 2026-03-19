@@ -190,9 +190,9 @@ class Config:
     # Number of steps to accumulate gradients before optimizer step (1 = every step, i.e. no accumulation)
     optimizer_stride: int = 4
     # Enable pre-rasterization frustum culling
-    enable_frustum_culling: bool = True
+    enable_frustum_culling: bool = False
     # Enable LRU input cache to skip repeated CPU->GPU transfers
-    enable_input_cache: bool = True
+    enable_input_cache: bool = False
 
     # LR for 3D point positions
     means_lr: float = 1.6e-4
