@@ -53,4 +53,4 @@ nsys --stats=true profile \
     --force-overwrite={force_overwrite} \
     --output={profile_output} \
     bash {script_path} \
-    --scenes {scenes} {extra_trainer_args}
+    {scenes}
