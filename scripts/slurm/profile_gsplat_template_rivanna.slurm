@@ -47,7 +47,7 @@ echo 'Running nsys profile \
     bash {script_path} \
     {script_args}'
 
-nsys profile \
+nsys --stats=true profile \
     --trace={trace} \
     --sample={sample} \
     --force-overwrite={force_overwrite} \
