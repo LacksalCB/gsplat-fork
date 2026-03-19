@@ -186,6 +186,14 @@ class Config:
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
 
+    # Ablation flags
+    # Number of steps to accumulate gradients before optimizer step (1 = every step, i.e. no accumulation)
+    optimizer_stride: int = 4
+    # Enable pre-rasterization frustum culling
+    enable_frustum_culling: bool = True
+    # Enable LRU input cache to skip repeated CPU->GPU transfers
+    enable_input_cache: bool = True
+
     # LR for 3D point positions
     means_lr: float = 1.6e-4
     # LR for Gaussian scale factors
@@ -862,7 +870,7 @@ class Runner:
         global_tic = time.time()
         pbar = tqdm.tqdm(range(init_step, max_steps))
    
-        optimizer_stride = 4
+        optimizer_stride = cfg.optimizer_stride
 
         for step in pbar:
             # Trigger Nsight Profiler API
@@ -883,18 +891,20 @@ class Runner:
 
             # CACHE ONLY THE RAW INPUTS (Images, Cameras, Masks)
             # This avoids slow Disk -> CPU -> GPU transfers on subsequent epochs
-            cached_data = self.cache_manager.get_cache(
-                view_id,
-                lambda: {
+            def _load_data():
+                return {
                     "pixels": data["image"].to(device) / 255.0,
                     "camtoworlds": data["camtoworld"].to(device),
                     "Ks": data["K"].to(device),
                     "image_ids": data["image_id"].to(device),
                     "camera_idcs": data["camera_idx"].to(device),
                     "masks": data.get("mask").to(device) if data.get("mask") is not None else None,
-                    "exposure": data.get("exposure").to(device) if "exposure" in data else None
+                    "exposure": data.get("exposure").to(device) if "exposure" in data else None,
                 }
-            )
+            if cfg.enable_input_cache:
+                cached_data = self.cache_manager.get_cache(view_id, _load_data)
+            else:
+                cached_data = _load_data()
             
             # Pull inputs from cache
             pixels = cached_data["pixels"]
@@ -916,13 +926,16 @@ class Runner:
 
             # Pre-rendering frustum culling (CLM paper §5.1): drop Gaussians
             # that are outside the view frustum before rasterization.
-            cull_mask = self.frustum_cull(
-                camtoworlds=camtoworlds,
-                Ks=Ks,
-                width=width,
-                height=height,
-                near_plane=cfg.near_plane,
-            )
+            if cfg.enable_frustum_culling:
+                cull_mask = self.frustum_cull(
+                    camtoworlds=camtoworlds,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    near_plane=cfg.near_plane,
+                )
+            else:
+                cull_mask = None
 
             # We call this FRESH so 'info' has active gradients for densification
             renders, alphas, info = self.rasterize_splats(
