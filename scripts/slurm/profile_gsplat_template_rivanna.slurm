@@ -39,15 +39,7 @@ pwd
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
-echo 'Running nsys profile \
-    --trace={trace} \
-    --sample={sample} \
-    --force-overwrite={force_overwrite} \
-    --output={profile_output} \
-    bash {script_path} \
-    {script_args}'
-
-nsys --stats=true profile \
+time nsys profile \
     --trace={trace} \
     --sample={sample} \
     --force-overwrite={force_overwrite} \
