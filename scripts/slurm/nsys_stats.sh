@@ -42,8 +42,8 @@ for REP_FILE in "$INPUT_DIR"/*.nsys-rep; do
         echo "========================================"
         nsys stats "$REP_FILE"
         echo ""
-    } >> "$OUTPUT_TXT"
+    } >> "$INPUT_DIR/$OUTPUT_TXT"
 
 done
 
-echo "Done. Results written to: $OUTPUT_TXT"
+echo "Done. Results written to: "$INPUT_DIR/$OUTPUT_TXT""
