@@ -1,0 +1,42 @@
+Thu Mar 19 02:32:00 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX A6000               Off |   00000000:23:00.0 Off |                  Off |
+| 30%   30C    P8             26W /  300W |      20MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           20044      G   /usr/libexec/Xorg                         8MiB |
++-----------------------------------------------------------------------------------------+
+/apps/software/standard/core/cuda/12.8.0/bin/nvcc
+GPU: NVIDIA_RTX_A6000
+Env: /scratch/rhm4nj/gpu_arch/envs/v100-env
+Reusing existing environment: /scratch/rhm4nj/gpu_arch/envs/v100-env
+which python (after):
+/sfs/weka/scratch/rhm4nj/gpu_arch/envs/v100-env/bin/python
+working in dir:
+/scratch/rhm4nj/gpu_arch/gsplat-fork/examples
+Running nsys profile \
+    --trace=cuda,osrt,nvtx \
+    --sample=cpu \
+    --force-overwrite=true \
+    --output=/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-19_02-31-44/results/gsplat_profile_bonsai \
+    bash /scratch/rhm4nj/gpu_arch/gsplat-fork/examples/benchmarks/custom_mod.sh \
+    bonsai
+Running bonsai
+Warning: image_path not found for reconstruction
+[Parser] 292 images, taken by 1 cameras.
+Downscaling images by 2x from data/360_v2/bonsai/images to data/360_v2/bonsai/images_2_png.
+[Parser] No valid EXIF exposure data found in any image.
+Scene scale: 1.2805438282393957
+Model initialized. Number of GS: 206613
