@@ -28,10 +28,11 @@ NSYS_DIR = Path("/bigtemp/rhm4nj/gpu_arch/project/gsplat-fork/scripts/slurm/outp
 # Kernel substrings to search for (case-insensitive substring match on the Name column).
 # The first match per file is used. Use short labels as keys for column headers.
 KERNELS = {
-    "rasterize_fwd":  "rasterizeToPixelsCUDA",
-    "rasterize_bwd":  "rasterizeToPixelsBackwardCUDA",
-    "preprocess":     "preprocessGaussiansCUDA",
-    "adam":           "adam_update",
+    "multi_tensor_apply_kernel":        "multi_tensor_apply_kernel",
+    "raster_bwd":  "rasterize_to_pixels_3dgs_bwd_kernel",
+    "cat_copy":    "CatArrayBatchedCopy",
+    "elementwise_kernel": "elementwise_kernel",
+    "raster_fwd":  "rasterize_to_pixels_3dgs_fwd_kernel",
 }
 
 # Metrics to extract per kernel (must match column names in nsys cuda_gpu_kern_sum CSV output).
