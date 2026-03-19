@@ -1,29 +1,7 @@
 SCENE_DIR="data/360_v2"
-RESULT_DIR="results/benchmark"
+RESULT_DIR="/tmp/gsplat_results_${SLURM_JOB_ID:-$$}"
+SCENE_LIST=($1)
 RENDER_TRAJ_PATH="ellipse"
-
-# Parse arguments: --scenes takes the scene list; all other flags are forwarded to trainer.py
-SCENES=""
-EXTRA_TRAINER_ARGS=""
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --scenes)
-            SCENES="$2"
-            shift 2
-            ;;
-        *)
-            EXTRA_TRAINER_ARGS="$EXTRA_TRAINER_ARGS $1"
-            shift
-            ;;
-    esac
-done
-
-if [ -z "$SCENES" ]; then
-    echo "Error: --scenes argument is required" >&2
-    exit 1
-fi
-
-SCENE_LIST=($SCENES)
 
 for SCENE in $SCENE_LIST;
 do
@@ -40,8 +18,7 @@ do
         --render_traj_path $RENDER_TRAJ_PATH \
         --data_dir data/360_v2/$SCENE/ \
         --result_dir $RESULT_DIR/$SCENE/ \
-        --eval_steps 0 \
-        $EXTRA_TRAINER_ARGS
+        --eval_steps 0
 
     # run eval and render
     for CKPT in $RESULT_DIR/$SCENE/ckpts/*;
@@ -50,8 +27,7 @@ do
             --render_traj_path $RENDER_TRAJ_PATH \
             --data_dir data/360_v2/$SCENE/ \
             --result_dir $RESULT_DIR/$SCENE/ \
-            --ckpt $CKPT \
-            $EXTRA_TRAINER_ARGS
+            --ckpt $CKPT
     done
 done
 
