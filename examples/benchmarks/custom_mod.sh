@@ -1,3 +1,4 @@
+shopt -s nullglob
 SCENE_DIR="data/360_v2"
 RESULT_DIR="/tmp/gsplat_results_${SLURM_JOB_ID:-$$}"
 SCENE_LIST=($1)
