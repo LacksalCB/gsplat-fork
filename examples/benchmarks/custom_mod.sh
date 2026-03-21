@@ -1,8 +1,8 @@
 shopt -s nullglob
 SCENE_DIR="data/360_v2"
-RESULT_DIR="/scratch/rhm4nj/gpu_arch/gsplat-fork/examples/results_slurm/gsplat_results_$(date +%Y%m%d_%H%M%S)"
 SCENE_LIST=($1)
-EXTRA_ARGS="${@:2}"   # all args after $1 passed through to trainer.py
+RESULT_DIR="${2:-/scratch/rhm4nj/gpu_arch/gsplat-fork/examples/results_slurm/gsplat_results_$(date +%Y%m%d_%H%M%S)}"
+EXTRA_ARGS="${@:3}"   # all args after $1 and $2 passed through to trainer.py
 RENDER_TRAJ_PATH="ellipse"
 
 for SCENE in $SCENE_LIST;
