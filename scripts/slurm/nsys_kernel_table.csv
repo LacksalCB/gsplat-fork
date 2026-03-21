@@ -1,9 +1,9 @@
-profile,multi_tensor_apply_kernel | Total Time (ns),multi_tensor_apply_kernel | Instances,raster_bwd | Total Time (ns),raster_bwd | Instances,cat_copy | Total Time (ns),cat_copy | Instances,elementwise_kernel | Total Time (ns),elementwise_kernel | Instances,raster_fwd | Total Time (ns),raster_fwd | Instances
-profile_gsplat_os-1_efc-False_eic-False,,,,,,,,,,
-profile_gsplat_os-1_efc-False_eic-True,,,,,,,,,,
-profile_gsplat_os-1_efc-True_eic-False,,,,,,,,,,
-profile_gsplat_os-1_efc-True_eic-True,,,,,,,,,,
-profile_gsplat_os-4_efc-False_eic-False,,,,,,,,,,
-profile_gsplat_os-4_efc-False_eic-True,,,,,,,,,,
-profile_gsplat_os-4_efc-True_eic-False,,,,,,,,,,
-profile_gsplat_os-4_efc-True_eic-True,,,,,,,,,,
+profile,Memset | Total Time (ns),Memset | Instances,HtoD | Total Time (ns),HtoD | Instances,DtoH | Total Time (ns),DtoH | Instances,DtoD | Total Time (ns),DtoD | Instances
+profile_gsplat_os-1_efc-False_eic-False,,,,,,,,
+profile_gsplat_os-1_efc-False_eic-True,,,,,,,,
+profile_gsplat_os-1_efc-True_eic-False,,,,,,,,
+profile_gsplat_os-1_efc-True_eic-True,,,,,,,,
+profile_gsplat_os-4_efc-False_eic-False,,,,,,,,
+profile_gsplat_os-4_efc-False_eic-True,,,,,,,,
+profile_gsplat_os-4_efc-True_eic-False,,,,,,,,
+profile_gsplat_os-4_efc-True_eic-True,,,,,,,,

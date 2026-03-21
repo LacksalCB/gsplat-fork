@@ -22,7 +22,7 @@ cd {project_dir}/examples
 which nvcc
 
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | tr ' ' '_')
-ENV_NAME="v100-env"
+ENV_NAME="{gpu_type}-env"
 ENV_DIR="/scratch/rhm4nj/gpu_arch/envs/$ENV_NAME"
 
 echo "GPU: $GPU_NAME"

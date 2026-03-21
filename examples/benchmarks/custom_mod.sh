@@ -1,6 +1,6 @@
 shopt -s nullglob
 SCENE_DIR="data/360_v2"
-RESULT_DIR="/tmp/gsplat_results_${SLURM_JOB_ID:-$$}"
+RESULT_DIR="/scratch/rhm4nj/gpu_arch/gsplat-fork/examples/results_slurm/gsplat_results_${SLURM_JOB_ID:-$$}"
 SCENE_LIST=($1)
 RENDER_TRAJ_PATH="ellipse"
 
@@ -22,6 +22,7 @@ do
         --eval_steps 0
 
     # run eval and render
+    echo "Running eval and render for $SCENE"
     for CKPT in $RESULT_DIR/$SCENE/ckpts/*;
     do
         CUDA_VISIBLE_DEVICES=0 python trainer.py default --disable_viewer --data_factor $DATA_FACTOR \
