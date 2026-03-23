@@ -47,4 +47,4 @@ time nsys profile \
     bash {script_path} \
     {scenes} \
     {profile_output} \
-    {extra_trainer_args}
+    {args}
