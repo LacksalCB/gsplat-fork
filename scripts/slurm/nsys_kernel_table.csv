@@ -1,0 +1,9 @@
+profile,Memset | Total Time (ns),Memset | Instances,HtoD | Total Time (ns),HtoD | Instances,DtoH | Total Time (ns),DtoH | Instances,DtoD | Total Time (ns),DtoD | Instances
+profile_gsplat_os-1_efc-False_eic-False,,,,,,,,
+profile_gsplat_os-1_efc-False_eic-True,,,,,,,,
+profile_gsplat_os-1_efc-True_eic-False,,,,,,,,
+profile_gsplat_os-1_efc-True_eic-True,,,,,,,,
+profile_gsplat_os-4_efc-False_eic-False,,,,,,,,
+profile_gsplat_os-4_efc-False_eic-True,,,,,,,,
+profile_gsplat_os-4_efc-True_eic-False,,,,,,,,
+profile_gsplat_os-4_efc-True_eic-True,,,,,,,,

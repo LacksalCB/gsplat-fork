@@ -1,6 +1,8 @@
+shopt -s nullglob
 SCENE_DIR="data/360_v2"
-RESULT_DIR="results/benchmark"
 SCENE_LIST=($1)
+RESULT_DIR="${2:-/scratch/rhm4nj/gpu_arch/gsplat-fork/examples/results_slurm/gsplat_results_$(date +%Y%m%d_%H%M%S)}"
+EXTRA_ARGS="${@:3}"   # all args after $1 and $2 passed through to trainer.py
 RENDER_TRAJ_PATH="ellipse"
 
 for SCENE in $SCENE_LIST;
@@ -14,20 +16,23 @@ do
     echo "Running $SCENE"
 
     # train without eval
-    CUDA_VISIBLE_DEVICES=0 python trainer.py default  --disable_viewer --data_factor $DATA_FACTOR \
+    time CUDA_VISIBLE_DEVICES=0 python -u trainer.py default  --disable_viewer --data_factor $DATA_FACTOR \
         --render_traj_path $RENDER_TRAJ_PATH \
         --data_dir data/360_v2/$SCENE/ \
         --result_dir $RESULT_DIR/$SCENE/ \
-        --eval_steps 0
+        --eval_steps 0 \
+        $EXTRA_ARGS
 
     # run eval and render
+    echo "Running eval and render for $SCENE"
     for CKPT in $RESULT_DIR/$SCENE/ckpts/*;
     do
-        CUDA_VISIBLE_DEVICES=0 python trainer.py default --disable_viewer --data_factor $DATA_FACTOR \
+        time CUDA_VISIBLE_DEVICES=0 python -u trainer.py default --disable_viewer --data_factor $DATA_FACTOR \
             --render_traj_path $RENDER_TRAJ_PATH \
             --data_dir data/360_v2/$SCENE/ \
             --result_dir $RESULT_DIR/$SCENE/ \
-            --ckpt $CKPT
+            --ckpt $CKPT \
+            $EXTRA_ARGS
     done
 done
 

@@ -1,0 +1,77 @@
+Thu Mar 19 02:32:00 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX A6000               Off |   00000000:61:00.0 Off |                  Off |
+| 30%   26C    P8             28W /  300W |      20MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           19992      G   /usr/libexec/Xorg                         8MiB |
++-----------------------------------------------------------------------------------------+
+/apps/software/standard/core/cuda/12.8.0/bin/nvcc
+GPU: NVIDIA_RTX_A6000
+Env: /scratch/rhm4nj/gpu_arch/envs/v100-env
+Reusing existing environment: /scratch/rhm4nj/gpu_arch/envs/v100-env
+which python (after):
+/sfs/weka/scratch/rhm4nj/gpu_arch/envs/v100-env/bin/python
+working in dir:
+/scratch/rhm4nj/gpu_arch/gsplat-fork/examples
+Running nsys profile \
+    --trace=cuda,osrt,nvtx \
+    --sample=cpu \
+    --force-overwrite=true \
+    --output=/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-19_02-31-44/results/gsplat_profile_counter \
+    bash /scratch/rhm4nj/gpu_arch/gsplat-fork/examples/benchmarks/custom_mod.sh \
+    counter
+Running counter
+Warning: image_path not found for reconstruction
+[Parser] 240 images, taken by 1 cameras.
+Downscaling images by 2x from data/360_v2/counter/images to data/360_v2/counter/images_2_png.
+[Parser] No valid EXIF exposure data found in any image.
+Scene scale: 1.2894489848743853
+Model initialized. Number of GS: 155767
+Warning: image_path not found for reconstruction
+[Parser] 240 images, taken by 1 cameras.
+Downscaling images by 2x from data/360_v2/counter/images to data/360_v2/counter/images_2_png.
+[Parser] No valid EXIF exposure data found in any image.
+Scene scale: 1.2894489848743853
+Model initialized. Number of GS: 155767
+Running evaluation...
+PSNR: 29.155, SSIM: 0.9163, LPIPS: 0.141 Time: 0.019s/image Number of GS: 1191946
+Running trajectory rendering...
+Video saved to results/benchmark/counter//videos/traj_29999.mp4
+Warning: image_path not found for reconstruction
+[Parser] 240 images, taken by 1 cameras.
+Downscaling images by 2x from data/360_v2/counter/images to data/360_v2/counter/images_2_png.
+[Parser] No valid EXIF exposure data found in any image.
+Scene scale: 1.2894489848743853
+Model initialized. Number of GS: 155767
+Running evaluation...
+PSNR: 27.278, SSIM: 0.8876, LPIPS: 0.191 Time: 0.019s/image Number of GS: 1013888
+Running trajectory rendering...
+Video saved to results/benchmark/counter//videos/traj_6999.mp4
+=== Eval Stats ===
+results/benchmark/counter/stats/val_step29999.json
+{"psnr": 29.15504264831543, "ssim": 0.9162560105323792, "lpips": 0.1412019580602646, "ellipse_time": 0.018633484840393066, "num_GS": 1191946}
+results/benchmark/counter/stats/val_step6999.json
+{"psnr": 27.278305053710938, "ssim": 0.8876214027404785, "lpips": 0.19071979820728302, "ellipse_time": 0.019338472684224447, "num_GS": 1013888}
+=== Train Stats ===
+results/benchmark/counter/stats/train_step29999_rank0.json
+{"mem": 1.8862943649291992, "ellipse_time": 845.5788753032684, "num_GS": 1191946}
+results/benchmark/counter/stats/train_step6999_rank0.json
+{"mem": 1.6718692779541016, "ellipse_time": 201.70024752616882, "num_GS": 1013888}
+Collecting data...
+Generating '/tmp/nsys-report-cb87.qdstrm'
+[1/1] [0%                          ] gsplat_profile_counter.nsys-rep[1/1] [0%                          ] gsplat_profile_counter.nsys-rep[1/1] [0%                          ] gsplat_profile_counter.nsys-rep[1/1] [6%                          ] gsplat_profile_counter.nsys-rep[1/1] [5%                          ] gsplat_profile_counter.nsys-rep[1/1] [5%                          ] gsplat_profile_counter.nsys-rep[1/1] [5%                          ] gsplat_profile_counter.nsys-rep[1/1] [5%                          ] gsplat_profile_counter.nsys-rep[1/1] [5%                          ] gsplat_profile_counter.nsys-rep[1/1] [6%                          ] gsplat_profile_counter.nsys-rep[1/1] [5%                          ] gsplat_profile_counter.nsys-rep[1/1] [6%                          ] gsplat_profile_counter.nsys-rep[1/1] [5%                          ] gsplat_profile_counter.nsys-rep[1/1] [6%                          ] gsplat_profile_counter.nsys-rep[1/1] [7%                          ] gsplat_profile_counter.nsys-rep[1/1] [8%                          ] gsplat_profile_counter.nsys-rep[1/1] [9%                          ] gsplat_profile_counter.nsys-rep[1/1] [10%                         ] gsplat_profile_counter.nsys-rep[1/1] [9%                          ] gsplat_profile_counter.nsys-rep[1/1] [10%                         ] gsplat_profile_counter.nsys-rep[1/1] [11%                         ] gsplat_profile_counter.nsys-rep[1/1] [12%                         ] gsplat_profile_counter.nsys-rep[1/1] [11%                         ] gsplat_profile_counter.nsys-rep[1/1] [12%                         ] gsplat_profile_counter.nsys-rep[1/1] [13%                         ] gsplat_profile_counter.nsys-rep[1/1] [12%                         ] gsplat_profile_counter.nsys-rep[1/1] [13%                         ] gsplat_profile_counter.nsys-rep[1/1] [12%                         ] gsplat_profile_counter.nsys-rep[1/1] [13%                         ] gsplat_profile_counter.nsys-rep[1/1] [14%                         ] gsplat_profile_counter.nsys-rep[1/1] [13%                         ] gsplat_profile_counter.nsys-rep[1/1] [14%                         ] gsplat_profile_counter.nsys-rep[1/1] [=15%                        ] gsplat_profile_counter.nsys-rep[1/1] [=16%                        ] gsplat_profile_counter.nsys-rep[1/1] [=17%                        ] gsplat_profile_counter.nsys-rep[1/1] [==18%                       ] gsplat_profile_counter.nsys-rep[1/1] [==19%                       ] gsplat_profile_counter.nsys-rep[1/1] [==20%                       ] gsplat_profile_counter.nsys-rep[1/1] [==21%                       ] gsplat_profile_counter.nsys-rep[1/1] [===22%                      ] gsplat_profile_counter.nsys-rep[1/1] [===23%                      ] gsplat_profile_counter.nsys-rep[1/1] [===24%                      ] gsplat_profile_counter.nsys-rep[1/1] [====25%                     ] gsplat_profile_counter.nsys-rep[1/1] [====26%                     ] gsplat_profile_counter.nsys-rep[1/1] [====27%                     ] gsplat_profile_counter.nsys-rep[1/1] [====28%                     ] gsplat_profile_counter.nsys-rep[1/1] [=====29%                    ] gsplat_profile_counter.nsys-rep[1/1] [=====30%                    ] gsplat_profile_counter.nsys-rep[1/1] [=====31%                    ] gsplat_profile_counter.nsys-rep[1/1] [=====32%                    ] gsplat_profile_counter.nsys-rep[1/1] [======33%                   ] gsplat_profile_counter.nsys-rep[1/1] [======34%                   ] gsplat_profile_counter.nsys-rep[1/1] [======35%                   ] gsplat_profile_counter.nsys-rep[1/1] [=======36%                  ] gsplat_profile_counter.nsys-rep[1/1] [=======37%                  ] gsplat_profile_counter.nsys-rep[1/1] [=======38%                  ] gsplat_profile_counter.nsys-rep[1/1] [=======39%                  ] gsplat_profile_counter.nsys-rep[1/1] [========40%                 ] gsplat_profile_counter.nsys-rep[1/1] [========41%                 ] gsplat_profile_counter.nsys-rep[1/1] [========42%                 ] gsplat_profile_counter.nsys-rep[1/1] [=========43%                ] gsplat_profile_counter.nsys-rep[1/1] [=========44%                ] gsplat_profile_counter.nsys-rep[1/1] [=========45%                ] gsplat_profile_counter.nsys-rep[1/1] [=========46%                ] gsplat_profile_counter.nsys-rep[1/1] [==========47%               ] gsplat_profile_counter.nsys-rep[1/1] [==========48%               ] gsplat_profile_counter.nsys-rep[1/1] [==========49%               ] gsplat_profile_counter.nsys-rep[1/1] [===========50%              ] gsplat_profile_counter.nsys-rep[1/1] [===========51%              ] gsplat_profile_counter.nsys-rep[1/1] [===========52%              ] gsplat_profile_counter.nsys-rep[1/1] [===========53%              ] gsplat_profile_counter.nsys-rep[1/1] [============54%             ] gsplat_profile_counter.nsys-rep[1/1] [============55%             ] gsplat_profile_counter.nsys-rep[1/1] [============56%             ] gsplat_profile_counter.nsys-rep[1/1] [============57%             ] gsplat_profile_counter.nsys-rep[1/1] [=============58%            ] gsplat_profile_counter.nsys-rep[1/1] [=============59%            ] gsplat_profile_counter.nsys-rep[1/1] [=============60%            ] gsplat_profile_counter.nsys-rep[1/1] [==============61%           ] gsplat_profile_counter.nsys-rep[1/1] [==============62%           ] gsplat_profile_counter.nsys-rep[1/1] [==============63%           ] gsplat_profile_counter.nsys-rep[1/1] [==============64%           ] gsplat_profile_counter.nsys-rep[1/1] [===============65%          ] gsplat_profile_counter.nsys-rep[1/1] [===============66%          ] gsplat_profile_counter.nsys-rep[1/1] [===============67%          ] gsplat_profile_counter.nsys-rep[1/1] [================68%         ] gsplat_profile_counter.nsys-rep[1/1] [================69%         ] gsplat_profile_counter.nsys-rep[1/1] [================70%         ] gsplat_profile_counter.nsys-rep[1/1] [================71%         ] gsplat_profile_counter.nsys-rep[1/1] [=================72%        ] gsplat_profile_counter.nsys-rep[1/1] [=================73%        ] gsplat_profile_counter.nsys-rep[1/1] [=================74%        ] gsplat_profile_counter.nsys-rep[1/1] [==================75%       ] gsplat_profile_counter.nsys-rep[1/1] [==================76%       ] gsplat_profile_counter.nsys-rep[1/1] [==================77%       ] gsplat_profile_counter.nsys-rep[1/1] [==================78%       ] gsplat_profile_counter.nsys-rep[1/1] [===================79%      ] gsplat_profile_counter.nsys-rep[1/1] [========================100%] gsplat_profile_counter.nsys-rep[1/1] [========================100%] gsplat_profile_counter.nsys-rep
+Generated:
+    /scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-19_02-31-44/results/gsplat_profile_counter.nsys-rep
