@@ -1,0 +1,361 @@
+Mon Mar 23 23:59:26 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX A6000               Off |   00000000:41:00.0 Off |                  Off |
+| 30%   28C    P8             34W /  300W |      20MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A          941151      G   /usr/libexec/Xorg                         8MiB |
++-----------------------------------------------------------------------------------------+
+/apps/software/standard/core/cuda/12.8.0/bin/nvcc
+GPU: NVIDIA_RTX_A6000
+Env: /scratch/rhm4nj/gpu_arch/envs/a6000-env
+Reusing existing environment: /scratch/rhm4nj/gpu_arch/envs/a6000-env
+which python (after):
+/sfs/weka/scratch/rhm4nj/gpu_arch/envs/a6000-env/bin/python
+working in dir:
+/scratch/rhm4nj/gpu_arch/gsplat-fork/examples
+Running garden
+Warning: image_path not found for reconstruction
+[Parser] 185 images, taken by 1 cameras.
+Downscaling images by 4x from data/360_v2/garden/images to data/360_v2/garden/images_4_png.
+[Parser] No valid EXIF exposure data found in any image.
+Scene scale: 1.2265263065808907
+Model initialized. Number of GS: 138766
+Step 600: 9248 GSs duplicated, 4684 GSs split. Now having 152698 GSs.
+Step 600: 457 GSs pruned. Now having 152241 GSs.
+Step 700: 23246 GSs duplicated, 10045 GSs split. Now having 185532 GSs.
+Step 700: 158 GSs pruned. Now having 185374 GSs.
+Step 800: 30772 GSs duplicated, 11523 GSs split. Now having 227669 GSs.
+Step 800: 112 GSs pruned. Now having 227557 GSs.
+Step 900: 37344 GSs duplicated, 11901 GSs split. Now having 276802 GSs.
+Step 900: 122 GSs pruned. Now having 276680 GSs.
+Step 1000: 43201 GSs duplicated, 12261 GSs split. Now having 332142 GSs.
+Step 1000: 176 GSs pruned. Now having 331966 GSs.
+Step 1100: 52066 GSs duplicated, 12155 GSs split. Now having 396187 GSs.
+Step 1100: 171 GSs pruned. Now having 396016 GSs.
+Step 1200: 56830 GSs duplicated, 12195 GSs split. Now having 465041 GSs.
+Step 1200: 218 GSs pruned. Now having 464823 GSs.
+Step 1300: 62457 GSs duplicated, 11256 GSs split. Now having 538536 GSs.
+Step 1300: 247 GSs pruned. Now having 538289 GSs.
+Step 1400: 70375 GSs duplicated, 10584 GSs split. Now having 619248 GSs.
+Step 1400: 282 GSs pruned. Now having 618966 GSs.
+Step 1500: 67367 GSs duplicated, 9822 GSs split. Now having 696155 GSs.
+Step 1500: 381 GSs pruned. Now having 695774 GSs.
+Step 1600: 76234 GSs duplicated, 9876 GSs split. Now having 781884 GSs.
+Step 1600: 430 GSs pruned. Now having 781454 GSs.
+Step 1700: 77865 GSs duplicated, 8864 GSs split. Now having 868183 GSs.
+Step 1700: 520 GSs pruned. Now having 867663 GSs.
+Step 1800: 83256 GSs duplicated, 8273 GSs split. Now having 959192 GSs.
+Step 1800: 521 GSs pruned. Now having 958671 GSs.
+Step 1900: 79321 GSs duplicated, 7052 GSs split. Now having 1045044 GSs.
+Step 1900: 565 GSs pruned. Now having 1044479 GSs.
+Step 2000: 84951 GSs duplicated, 7751 GSs split. Now having 1137181 GSs.
+Step 2000: 621 GSs pruned. Now having 1136560 GSs.
+Step 2100: 84636 GSs duplicated, 6155 GSs split. Now having 1227351 GSs.
+Step 2100: 715 GSs pruned. Now having 1226636 GSs.
+Step 2200: 83891 GSs duplicated, 5915 GSs split. Now having 1316442 GSs.
+Step 2200: 691 GSs pruned. Now having 1315751 GSs.
+Step 2300: 87789 GSs duplicated, 6357 GSs split. Now having 1409897 GSs.
+Step 2300: 847 GSs pruned. Now having 1409050 GSs.
+Step 2400: 85868 GSs duplicated, 5347 GSs split. Now having 1500265 GSs.
+Step 2400: 842 GSs pruned. Now having 1499423 GSs.
+Step 2500: 85092 GSs duplicated, 5331 GSs split. Now having 1589846 GSs.
+Step 2500: 826 GSs pruned. Now having 1589020 GSs.
+Step 2600: 86594 GSs duplicated, 4895 GSs split. Now having 1680509 GSs.
+Step 2600: 887 GSs pruned. Now having 1679622 GSs.
+Step 2700: 92156 GSs duplicated, 5706 GSs split. Now having 1777484 GSs.
+Step 2700: 890 GSs pruned. Now having 1776594 GSs.
+Step 2800: 87938 GSs duplicated, 4927 GSs split. Now having 1869459 GSs.
+Step 2800: 1114 GSs pruned. Now having 1868345 GSs.
+Step 2900: 88180 GSs duplicated, 4780 GSs split. Now having 1961305 GSs.
+Step 2900: 1086 GSs pruned. Now having 1960219 GSs.
+Step 3000: 85729 GSs duplicated, 4147 GSs split. Now having 2050095 GSs.
+Step 3000: 1201 GSs pruned. Now having 2048894 GSs.
+Step 3100: 15781 GSs duplicated, 2453 GSs split. Now having 2067128 GSs.
+Step 3100: 211323 GSs pruned. Now having 1855805 GSs.
+Step 3200: 71004 GSs duplicated, 8868 GSs split. Now having 1935677 GSs.
+Step 3200: 6194 GSs pruned. Now having 1929483 GSs.
+Step 3300: 73991 GSs duplicated, 8895 GSs split. Now having 2012369 GSs.
+Step 3300: 3815 GSs pruned. Now having 2008554 GSs.
+Step 3400: 72075 GSs duplicated, 8140 GSs split. Now having 2088769 GSs.
+Step 3400: 3429 GSs pruned. Now having 2085340 GSs.
+Step 3500: 79418 GSs duplicated, 7323 GSs split. Now having 2172081 GSs.
+Step 3500: 2774 GSs pruned. Now having 2169307 GSs.
+Step 3600: 76333 GSs duplicated, 8466 GSs split. Now having 2254106 GSs.
+Step 3600: 2559 GSs pruned. Now having 2251547 GSs.
+Step 3700: 80405 GSs duplicated, 8151 GSs split. Now having 2340103 GSs.
+Step 3700: 2322 GSs pruned. Now having 2337781 GSs.
+Step 3800: 73521 GSs duplicated, 6732 GSs split. Now having 2418034 GSs.
+Step 3800: 2266 GSs pruned. Now having 2415768 GSs.
+Step 3900: 80931 GSs duplicated, 6174 GSs split. Now having 2502873 GSs.
+Step 3900: 2180 GSs pruned. Now having 2500693 GSs.
+Step 4000: 73116 GSs duplicated, 5605 GSs split. Now having 2579414 GSs.
+Step 4000: 2226 GSs pruned. Now having 2577188 GSs.
+Step 4100: 71498 GSs duplicated, 4505 GSs split. Now having 2653191 GSs.
+Step 4100: 2226 GSs pruned. Now having 2650965 GSs.
+Step 4200: 77296 GSs duplicated, 6011 GSs split. Now having 2734272 GSs.
+Step 4200: 2059 GSs pruned. Now having 2732213 GSs.
+Step 4300: 76758 GSs duplicated, 5989 GSs split. Now having 2814960 GSs.
+Step 4300: 1968 GSs pruned. Now having 2812992 GSs.
+Step 4400: 67696 GSs duplicated, 4452 GSs split. Now having 2885140 GSs.
+Step 4400: 2263 GSs pruned. Now having 2882877 GSs.
+Step 4500: 76559 GSs duplicated, 4305 GSs split. Now having 2963741 GSs.
+Step 4500: 2116 GSs pruned. Now having 2961625 GSs.
+Step 4600: 64421 GSs duplicated, 3253 GSs split. Now having 3029299 GSs.
+Step 4600: 2229 GSs pruned. Now having 3027070 GSs.
+Step 4700: 76268 GSs duplicated, 4476 GSs split. Now having 3107814 GSs.
+Step 4700: 1956 GSs pruned. Now having 3105858 GSs.
+Step 4800: 64716 GSs duplicated, 2420 GSs split. Now having 3172994 GSs.
+Step 4800: 2235 GSs pruned. Now having 3170759 GSs.
+Step 4900: 66408 GSs duplicated, 3599 GSs split. Now having 3240766 GSs.
+Step 4900: 2373 GSs pruned. Now having 3238393 GSs.
+Step 5000: 69210 GSs duplicated, 3014 GSs split. Now having 3310617 GSs.
+Step 5000: 2102 GSs pruned. Now having 3308515 GSs.
+Step 5100: 62839 GSs duplicated, 2561 GSs split. Now having 3373915 GSs.
+Step 5100: 2152 GSs pruned. Now having 3371763 GSs.
+Step 5200: 63651 GSs duplicated, 2888 GSs split. Now having 3438302 GSs.
+Step 5200: 2383 GSs pruned. Now having 3435919 GSs.
+Step 5300: 61801 GSs duplicated, 2662 GSs split. Now having 3500382 GSs.
+Step 5300: 2209 GSs pruned. Now having 3498173 GSs.
+Step 5400: 60120 GSs duplicated, 2704 GSs split. Now having 3560997 GSs.
+Step 5400: 2292 GSs pruned. Now having 3558705 GSs.
+Step 5500: 61052 GSs duplicated, 2671 GSs split. Now having 3622428 GSs.
+Step 5500: 2378 GSs pruned. Now having 3620050 GSs.
+Step 5600: 54008 GSs duplicated, 1851 GSs split. Now having 3675909 GSs.
+Step 5600: 2235 GSs pruned. Now having 3673674 GSs.
+Step 5700: 64352 GSs duplicated, 2730 GSs split. Now having 3740756 GSs.
+Step 5700: 2242 GSs pruned. Now having 3738514 GSs.
+Step 5800: 53731 GSs duplicated, 2206 GSs split. Now having 3794451 GSs.
+Step 5800: 2369 GSs pruned. Now having 3792082 GSs.
+Step 5900: 56863 GSs duplicated, 2007 GSs split. Now having 3850952 GSs.
+Step 5900: 2284 GSs pruned. Now having 3848668 GSs.
+Step 6000: 51523 GSs duplicated, 2186 GSs split. Now having 3902377 GSs.
+Step 6000: 2463 GSs pruned. Now having 3899914 GSs.
+Step 6100: 6233 GSs duplicated, 1480 GSs split. Now having 3907627 GSs.
+Step 6100: 255787 GSs pruned. Now having 3651840 GSs.
+Step 6200: 29455 GSs duplicated, 4408 GSs split. Now having 3685703 GSs.
+Step 6200: 5826 GSs pruned. Now having 3679877 GSs.
+Step 6300: 38119 GSs duplicated, 3765 GSs split. Now having 3721761 GSs.
+Step 6300: 3812 GSs pruned. Now having 3717949 GSs.
+Step 6400: 33102 GSs duplicated, 3702 GSs split. Now having 3754753 GSs.
+Step 6400: 3322 GSs pruned. Now having 3751431 GSs.
+Step 6500: 41560 GSs duplicated, 3214 GSs split. Now having 3796205 GSs.
+Step 6500: 2808 GSs pruned. Now having 3793397 GSs.
+Step 6600: 43557 GSs duplicated, 3666 GSs split. Now having 3840620 GSs.
+Step 6600: 2661 GSs pruned. Now having 3837959 GSs.
+Step 6700: 35051 GSs duplicated, 2148 GSs split. Now having 3875158 GSs.
+Step 6700: 2686 GSs pruned. Now having 3872472 GSs.
+Step 6800: 39334 GSs duplicated, 2136 GSs split. Now having 3913942 GSs.
+Step 6800: 2551 GSs pruned. Now having 3911391 GSs.
+Step 6900: 40525 GSs duplicated, 2816 GSs split. Now having 3954732 GSs.
+Step 6900: 2246 GSs pruned. Now having 3952486 GSs.
+Step:  6999 {'mem': 7.772202491760254, 'ellipse_time': 262.93975734710693, 'num_GS': 3952486}
+Step 7000: 37852 GSs duplicated, 2323 GSs split. Now having 3992661 GSs.
+Step 7000: 2360 GSs pruned. Now having 3990301 GSs.
+Step 7100: 39667 GSs duplicated, 2466 GSs split. Now having 4032434 GSs.
+Step 7100: 2356 GSs pruned. Now having 4030078 GSs.
+Step 7200: 40485 GSs duplicated, 1958 GSs split. Now having 4072521 GSs.
+Step 7200: 2169 GSs pruned. Now having 4070352 GSs.
+Step 7300: 31757 GSs duplicated, 1565 GSs split. Now having 4103674 GSs.
+Step 7300: 2347 GSs pruned. Now having 4101327 GSs.
+Step 7400: 40286 GSs duplicated, 2072 GSs split. Now having 4143685 GSs.
+Step 7400: 2179 GSs pruned. Now having 4141506 GSs.
+Step 7500: 33610 GSs duplicated, 1602 GSs split. Now having 4176718 GSs.
+Step 7500: 2304 GSs pruned. Now having 4174414 GSs.
+Step 7600: 31879 GSs duplicated, 1376 GSs split. Now having 4207669 GSs.
+Step 7600: 2241 GSs pruned. Now having 4205428 GSs.
+Step 7700: 36725 GSs duplicated, 1961 GSs split. Now having 4244114 GSs.
+Step 7700: 2238 GSs pruned. Now having 4241876 GSs.
+Step 7800: 34284 GSs duplicated, 2072 GSs split. Now having 4278232 GSs.
+Step 7800: 2269 GSs pruned. Now having 4275963 GSs.
+Step 7900: 35332 GSs duplicated, 1746 GSs split. Now having 4313041 GSs.
+Step 7900: 2195 GSs pruned. Now having 4310846 GSs.
+Step 8000: 28149 GSs duplicated, 1087 GSs split. Now having 4340082 GSs.
+Step 8000: 2297 GSs pruned. Now having 4337785 GSs.
+Step 8100: 35393 GSs duplicated, 2005 GSs split. Now having 4375183 GSs.
+Step 8100: 2467 GSs pruned. Now having 4372716 GSs.
+Step 8200: 33576 GSs duplicated, 1605 GSs split. Now having 4407897 GSs.
+Step 8200: 2182 GSs pruned. Now having 4405715 GSs.
+Step 8300: 29440 GSs duplicated, 1357 GSs split. Now having 4436512 GSs.
+Step 8300: 2308 GSs pruned. Now having 4434204 GSs.
+Step 8400: 33475 GSs duplicated, 1472 GSs split. Now having 4469151 GSs.
+Step 8400: 2424 GSs pruned. Now having 4466727 GSs.
+Step 8500: 29540 GSs duplicated, 1334 GSs split. Now having 4497601 GSs.
+Step 8500: 2125 GSs pruned. Now having 4495476 GSs.
+Step 8600: 30598 GSs duplicated, 1537 GSs split. Now having 4527611 GSs.
+Step 8600: 2504 GSs pruned. Now having 4525107 GSs.
+Step 8700: 33087 GSs duplicated, 1679 GSs split. Now having 4559873 GSs.
+Step 8700: 2140 GSs pruned. Now having 4557733 GSs.
+Step 8800: 27388 GSs duplicated, 1523 GSs split. Now having 4586644 GSs.
+Step 8800: 2253 GSs pruned. Now having 4584391 GSs.
+Step 8900: 30432 GSs duplicated, 1213 GSs split. Now having 4616036 GSs.
+Step 8900: 2582 GSs pruned. Now having 4613454 GSs.
+Step 9000: 28332 GSs duplicated, 1368 GSs split. Now having 4643154 GSs.
+Step 9000: 2436 GSs pruned. Now having 4640718 GSs.
+Step 9100: 3166 GSs duplicated, 1015 GSs split. Now having 4644899 GSs.
+Step 9100: 231699 GSs pruned. Now having 4413200 GSs.
+Step 9200: 16056 GSs duplicated, 4368 GSs split. Now having 4433624 GSs.
+Step 9200: 5765 GSs pruned. Now having 4427859 GSs.
+Step 9300: 15760 GSs duplicated, 2975 GSs split. Now having 4446594 GSs.
+Step 9300: 2970 GSs pruned. Now having 4443624 GSs.
+Step 9400: 14511 GSs duplicated, 2249 GSs split. Now having 4460384 GSs.
+Step 9400: 2583 GSs pruned. Now having 4457801 GSs.
+Step 9500: 22682 GSs duplicated, 3246 GSs split. Now having 4483729 GSs.
+Step 9500: 1883 GSs pruned. Now having 4481846 GSs.
+Step 9600: 16434 GSs duplicated, 1727 GSs split. Now having 4500007 GSs.
+Step 9600: 1995 GSs pruned. Now having 4498012 GSs.
+Step 9700: 16052 GSs duplicated, 1494 GSs split. Now having 4515558 GSs.
+Step 9700: 1976 GSs pruned. Now having 4513582 GSs.
+Step 9800: 19402 GSs duplicated, 2050 GSs split. Now having 4535034 GSs.
+Step 9800: 1556 GSs pruned. Now having 4533478 GSs.
+Step 9900: 19388 GSs duplicated, 1668 GSs split. Now having 4554534 GSs.
+Step 9900: 1683 GSs pruned. Now having 4552851 GSs.
+Step 10000: 18972 GSs duplicated, 1511 GSs split. Now having 4573334 GSs.
+Step 10000: 1693 GSs pruned. Now having 4571641 GSs.
+Step 10100: 16706 GSs duplicated, 1013 GSs split. Now having 4589360 GSs.
+Step 10100: 1538 GSs pruned. Now having 4587822 GSs.
+Step 10200: 19829 GSs duplicated, 2169 GSs split. Now having 4609820 GSs.
+Step 10200: 1607 GSs pruned. Now having 4608213 GSs.
+Step 10300: 16042 GSs duplicated, 971 GSs split. Now having 4625226 GSs.
+Step 10300: 1539 GSs pruned. Now having 4623687 GSs.
+Step 10400: 16226 GSs duplicated, 1300 GSs split. Now having 4641213 GSs.
+Step 10400: 1747 GSs pruned. Now having 4639466 GSs.
+Step 10500: 19985 GSs duplicated, 1310 GSs split. Now having 4660761 GSs.
+Step 10500: 1692 GSs pruned. Now having 4659069 GSs.
+Step 10600: 15742 GSs duplicated, 1002 GSs split. Now having 4675813 GSs.
+Step 10600: 1556 GSs pruned. Now having 4674257 GSs.
+Step 10700: 17757 GSs duplicated, 1083 GSs split. Now having 4693097 GSs.
+Step 10700: 1677 GSs pruned. Now having 4691420 GSs.
+Step 10800: 20977 GSs duplicated, 1681 GSs split. Now having 4714078 GSs.
+Step 10800: 1530 GSs pruned. Now having 4712548 GSs.
+Step 10900: 15318 GSs duplicated, 1118 GSs split. Now having 4728984 GSs.
+Step 10900: 1658 GSs pruned. Now having 4727326 GSs.
+Step 11000: 16288 GSs duplicated, 1130 GSs split. Now having 4744744 GSs.
+Step 11000: 1781 GSs pruned. Now having 4742963 GSs.
+Step 11100: 19255 GSs duplicated, 1128 GSs split. Now having 4763346 GSs.
+Step 11100: 1625 GSs pruned. Now having 4761721 GSs.
+Step 11200: 17892 GSs duplicated, 1349 GSs split. Now having 4780962 GSs.
+Step 11200: 1708 GSs pruned. Now having 4779254 GSs.
+Step 11300: 16389 GSs duplicated, 931 GSs split. Now having 4796574 GSs.
+Step 11300: 1584 GSs pruned. Now having 4794990 GSs.
+Step 11400: 18512 GSs duplicated, 1176 GSs split. Now having 4814678 GSs.
+Step 11400: 1618 GSs pruned. Now having 4813060 GSs.
+Step 11500: 19835 GSs duplicated, 1433 GSs split. Now having 4834328 GSs.
+Step 11500: 1775 GSs pruned. Now having 4832553 GSs.
+Step 11600: 16618 GSs duplicated, 1323 GSs split. Now having 4850494 GSs.
+Step 11600: 1649 GSs pruned. Now having 4848845 GSs.
+Step 11700: 15605 GSs duplicated, 899 GSs split. Now having 4865349 GSs.
+Step 11700: 1750 GSs pruned. Now having 4863599 GSs.
+Step 11800: 19701 GSs duplicated, 1270 GSs split. Now having 4884570 GSs.
+Step 11800: 1702 GSs pruned. Now having 4882868 GSs.
+Step 11900: 17618 GSs duplicated, 1348 GSs split. Now having 4901834 GSs.
+Step 11900: 1614 GSs pruned. Now having 4900220 GSs.
+Step 12000: 17660 GSs duplicated, 1219 GSs split. Now having 4919099 GSs.
+Step 12000: 1761 GSs pruned. Now having 4917338 GSs.
+Step 12100: 2927 GSs duplicated, 1223 GSs split. Now having 4921488 GSs.
+Step 12100: 259784 GSs pruned. Now having 4661704 GSs.
+Step 12200: 11965 GSs duplicated, 4378 GSs split. Now having 4678047 GSs.
+Step 12200: 3424 GSs pruned. Now having 4674623 GSs.
+Step 12300: 9463 GSs duplicated, 2569 GSs split. Now having 4686655 GSs.
+Step 12300: 2007 GSs pruned. Now having 4684648 GSs.
+Step 12400: 10857 GSs duplicated, 2326 GSs split. Now having 4697831 GSs.
+Step 12400: 1292 GSs pruned. Now having 4696539 GSs.
+Step 12500: 7528 GSs duplicated, 1179 GSs split. Now having 4705246 GSs.
+Step 12500: 1236 GSs pruned. Now having 4704010 GSs.
+Step 12600: 13146 GSs duplicated, 2613 GSs split. Now having 4719769 GSs.
+Step 12600: 1100 GSs pruned. Now having 4718669 GSs.
+Step 12700: 11115 GSs duplicated, 1639 GSs split. Now having 4731423 GSs.
+Step 12700: 981 GSs pruned. Now having 4730442 GSs.
+Step 12800: 8352 GSs duplicated, 1069 GSs split. Now having 4739863 GSs.
+Step 12800: 1075 GSs pruned. Now having 4738788 GSs.
+Step 12900: 10925 GSs duplicated, 1224 GSs split. Now having 4750937 GSs.
+Step 12900: 965 GSs pruned. Now having 4749972 GSs.
+Step 13000: 8935 GSs duplicated, 1034 GSs split. Now having 4759941 GSs.
+Step 13000: 1077 GSs pruned. Now having 4758864 GSs.
+Step 13100: 10846 GSs duplicated, 1371 GSs split. Now having 4771081 GSs.
+Step 13100: 1158 GSs pruned. Now having 4769923 GSs.
+Step 13200: 9912 GSs duplicated, 888 GSs split. Now having 4780723 GSs.
+Step 13200: 967 GSs pruned. Now having 4779756 GSs.
+Step 13300: 8444 GSs duplicated, 867 GSs split. Now having 4789067 GSs.
+Step 13300: 1051 GSs pruned. Now having 4788016 GSs.
+Step 13400: 11861 GSs duplicated, 1150 GSs split. Now having 4801027 GSs.
+Step 13400: 1061 GSs pruned. Now having 4799966 GSs.
+Step 13500: 9063 GSs duplicated, 740 GSs split. Now having 4809769 GSs.
+Step 13500: 907 GSs pruned. Now having 4808862 GSs.
+Step 13600: 10622 GSs duplicated, 1006 GSs split. Now having 4820490 GSs.
+Step 13600: 996 GSs pruned. Now having 4819494 GSs.
+Step 13700: 11589 GSs duplicated, 990 GSs split. Now having 4832073 GSs.
+Step 13700: 962 GSs pruned. Now having 4831111 GSs.
+Step 13800: 9901 GSs duplicated, 897 GSs split. Now having 4841909 GSs.
+Step 13800: 1057 GSs pruned. Now having 4840852 GSs.
+Step 13900: 9549 GSs duplicated, 776 GSs split. Now having 4851177 GSs.
+Step 13900: 1126 GSs pruned. Now having 4850051 GSs.
+Step 14000: 13123 GSs duplicated, 1737 GSs split. Now having 4864911 GSs.
+Step 14000: 1016 GSs pruned. Now having 4863895 GSs.
+Step 14100: 9902 GSs duplicated, 1146 GSs split. Now having 4874943 GSs.
+Step 14100: 1085 GSs pruned. Now having 4873858 GSs.
+Step 14200: 12719 GSs duplicated, 968 GSs split. Now having 4887545 GSs.
+Step 14200: 1180 GSs pruned. Now having 4886365 GSs.
+Step 14300: 10026 GSs duplicated, 867 GSs split. Now having 4897258 GSs.
+Step 14300: 1048 GSs pruned. Now having 4896210 GSs.
+Step 14400: 9800 GSs duplicated, 1011 GSs split. Now having 4907021 GSs.
+Step 14400: 1167 GSs pruned. Now having 4905854 GSs.
+Step 14500: 10469 GSs duplicated, 945 GSs split. Now having 4917268 GSs.
+Step 14500: 1081 GSs pruned. Now having 4916187 GSs.
+Step 14600: 8747 GSs duplicated, 604 GSs split. Now having 4925538 GSs.
+Step 14600: 1243 GSs pruned. Now having 4924295 GSs.
+Step 14700: 14214 GSs duplicated, 2151 GSs split. Now having 4940660 GSs.
+Step 14700: 1144 GSs pruned. Now having 4939516 GSs.
+Step 14800: 14351 GSs duplicated, 1329 GSs split. Now having 4955196 GSs.
+Step 14800: 1076 GSs pruned. Now having 4954120 GSs.
+Step 14900: 10129 GSs duplicated, 807 GSs split. Now having 4965056 GSs.
+Step 14900: 1339 GSs pruned. Now having 4963717 GSs.
+Step:  29999 {'mem': 9.255745887756348, 'ellipse_time': 1656.4732630252838, 'num_GS': 4963717}
+Running eval and render for garden
+Warning: image_path not found for reconstruction
+[Parser] 185 images, taken by 1 cameras.
+Downscaling images by 4x from data/360_v2/garden/images to data/360_v2/garden/images_4_png.
+[Parser] No valid EXIF exposure data found in any image.
+Scene scale: 1.2265263065808907
+Model initialized. Number of GS: 138766
+Running evaluation...
+PSNR: 27.706, SSIM: 0.8710, LPIPS: 0.073 Time: 0.095s/image Number of GS: 4963717
+Running trajectory rendering...
+Video saved to /scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-23_23-59-19_ablations/results/profile_gsplat_os-1_efc-False_eic-True/garden//videos/traj_29999.mp4
+Warning: image_path not found for reconstruction
+[Parser] 185 images, taken by 1 cameras.
+Downscaling images by 4x from data/360_v2/garden/images to data/360_v2/garden/images_4_png.
+[Parser] No valid EXIF exposure data found in any image.
+Scene scale: 1.2265263065808907
+Model initialized. Number of GS: 138766
+Running evaluation...
+PSNR: 26.615, SSIM: 0.8378, LPIPS: 0.119 Time: 0.073s/image Number of GS: 3952486
+Running trajectory rendering...
+Video saved to /scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-23_23-59-19_ablations/results/profile_gsplat_os-1_efc-False_eic-True/garden//videos/traj_6999.mp4
+=== Eval Stats ===
+/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-23_23-59-19_ablations/results/profile_gsplat_os-1_efc-False_eic-True/garden/stats/val_step29999.json
+{"psnr": 27.706289291381836, "ssim": 0.8709821105003357, "lpips": 0.07254445552825928, "ellipse_time": 0.09474889437357585, "num_GS": 4963717}
+/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-23_23-59-19_ablations/results/profile_gsplat_os-1_efc-False_eic-True/garden/stats/val_step6999.json
+{"psnr": 26.61512565612793, "ssim": 0.8377911448478699, "lpips": 0.11913575977087021, "ellipse_time": 0.0730752448240916, "num_GS": 3952486}
+=== Train Stats ===
+/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-23_23-59-19_ablations/results/profile_gsplat_os-1_efc-False_eic-True/garden/stats/train_step29999_rank0.json
+{"mem": 9.255745887756348, "ellipse_time": 1656.4732630252838, "num_GS": 4963717}
+/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-23_23-59-19_ablations/results/profile_gsplat_os-1_efc-False_eic-True/garden/stats/train_step6999_rank0.json
+{"mem": 7.772202491760254, "ellipse_time": 262.93975734710693, "num_GS": 3952486}
+Collecting data...
+Generating '/tmp/nsys-report-b223.qdstrm'
+[1/1] [0%                          ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [0%                          ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [9%                          ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [10%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [9%                          ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [10%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [9%                          ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [10%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [9%                          ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [10%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=17%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=17%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==19%                       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==18%                       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=17%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==18%                       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=17%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=17%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [10%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [10%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [10%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [11%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [12%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [13%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [14%                         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=15%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=16%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=17%                        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==18%                       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==19%                       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==20%                       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==21%                       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===22%                      ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===23%                      ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===24%                      ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [====25%                     ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [====26%                     ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [====27%                     ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [====28%                     ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=====29%                    ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=====30%                    ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=====31%                    ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=====32%                    ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [======33%                   ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [======34%                   ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [======35%                   ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=======36%                  ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=======37%                  ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=======38%                  ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=======39%                  ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [========40%                 ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [========41%                 ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [========42%                 ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=========43%                ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=========44%                ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=========45%                ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=========46%                ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==========47%               ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==========48%               ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==========49%               ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===========50%              ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===========51%              ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===========52%              ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===========53%              ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [============54%             ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [============55%             ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [============56%             ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [============57%             ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=============58%            ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=============59%            ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=============60%            ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==============61%           ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==============62%           ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==============63%           ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==============64%           ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===============65%          ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===============66%          ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===============67%          ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [================68%         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [================69%         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [================70%         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [================71%         ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=================72%        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=================73%        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [=================74%        ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==================75%       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==================76%       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==================77%       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [==================78%       ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===================79%      ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [===================80%      ] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [========================100%] profile_gsplat_os-1_efc-False_eic-True.nsys-rep[1/1] [========================100%] profile_gsplat_os-1_efc-False_eic-True.nsys-rep
+Generated:
+    /scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-23_23-59-19_ablations/results/profile_gsplat_os-1_efc-False_eic-True.nsys-rep

@@ -1,0 +1,324 @@
+Tue Mar 24 00:33:30 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX A6000               Off |   00000000:61:00.0 Off |                  Off |
+| 30%   32C    P8             31W /  300W |      20MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           28056      G   /usr/libexec/Xorg                         8MiB |
++-----------------------------------------------------------------------------------------+
+/apps/software/standard/core/cuda/12.8.0/bin/nvcc
+GPU: NVIDIA_RTX_A6000
+Env: /scratch/rhm4nj/gpu_arch/envs/a6000-env
+Reusing existing environment: /scratch/rhm4nj/gpu_arch/envs/a6000-env
+which python (after):
+/sfs/weka/scratch/rhm4nj/gpu_arch/envs/a6000-env/bin/python
+working in dir:
+/scratch/rhm4nj/gpu_arch/gsplat-fork/examples
+Running bonsai
+Warning: image_path not found for reconstruction
+[Parser] 292 images, taken by 1 cameras.
+Downscaling images by 2x from data/360_v2/bonsai/images to data/360_v2/bonsai/images_2_png.
+[Parser] No valid EXIF exposure data found in any image.
+Scene scale: 1.2805438282393957
+Model initialized. Number of GS: 206613
+Step 600: 0 GSs duplicated, 0 GSs split. Now having 206613 GSs.
+Step 600: 282 GSs pruned. Now having 206331 GSs.
+Step 700: 2 GSs duplicated, 2 GSs split. Now having 206335 GSs.
+Step 700: 164 GSs pruned. Now having 206171 GSs.
+Step 800: 3 GSs duplicated, 2 GSs split. Now having 206176 GSs.
+Step 800: 214 GSs pruned. Now having 205962 GSs.
+Step 900: 18 GSs duplicated, 2 GSs split. Now having 205982 GSs.
+Step 900: 201 GSs pruned. Now having 205781 GSs.
+Step 1000: 6 GSs duplicated, 3 GSs split. Now having 205790 GSs.
+Step 1000: 223 GSs pruned. Now having 205567 GSs.
+Step 1100: 21 GSs duplicated, 2 GSs split. Now having 205590 GSs.
+Step 1100: 193 GSs pruned. Now having 205397 GSs.
+Step 1200: 15 GSs duplicated, 3 GSs split. Now having 205415 GSs.
+Step 1200: 181 GSs pruned. Now having 205234 GSs.
+Step 1300: 11 GSs duplicated, 2 GSs split. Now having 205247 GSs.
+Step 1300: 174 GSs pruned. Now having 205073 GSs.
+Step 1400: 7 GSs duplicated, 3 GSs split. Now having 205083 GSs.
+Step 1400: 177 GSs pruned. Now having 204906 GSs.
+Step 1500: 54 GSs duplicated, 7 GSs split. Now having 204967 GSs.
+Step 1500: 157 GSs pruned. Now having 204810 GSs.
+Step 1600: 26 GSs duplicated, 5 GSs split. Now having 204841 GSs.
+Step 1600: 156 GSs pruned. Now having 204685 GSs.
+Step 1700: 19 GSs duplicated, 3 GSs split. Now having 204707 GSs.
+Step 1700: 156 GSs pruned. Now having 204551 GSs.
+Step 1800: 23 GSs duplicated, 4 GSs split. Now having 204578 GSs.
+Step 1800: 109 GSs pruned. Now having 204469 GSs.
+Step 1900: 16 GSs duplicated, 2 GSs split. Now having 204487 GSs.
+Step 1900: 101 GSs pruned. Now having 204386 GSs.
+Step 2000: 37 GSs duplicated, 4 GSs split. Now having 204427 GSs.
+Step 2000: 101 GSs pruned. Now having 204326 GSs.
+Step 2100: 41 GSs duplicated, 8 GSs split. Now having 204375 GSs.
+Step 2100: 114 GSs pruned. Now having 204261 GSs.
+Step 2200: 12 GSs duplicated, 0 GSs split. Now having 204273 GSs.
+Step 2200: 86 GSs pruned. Now having 204187 GSs.
+Step 2300: 21 GSs duplicated, 2 GSs split. Now having 204210 GSs.
+Step 2300: 90 GSs pruned. Now having 204120 GSs.
+Step 2400: 34 GSs duplicated, 9 GSs split. Now having 204163 GSs.
+Step 2400: 93 GSs pruned. Now having 204070 GSs.
+Step 2500: 13 GSs duplicated, 6 GSs split. Now having 204089 GSs.
+Step 2500: 74 GSs pruned. Now having 204015 GSs.
+Step 2600: 46 GSs duplicated, 7 GSs split. Now having 204068 GSs.
+Step 2600: 73 GSs pruned. Now having 203995 GSs.
+Step 2700: 21 GSs duplicated, 2 GSs split. Now having 204018 GSs.
+Step 2700: 76 GSs pruned. Now having 203942 GSs.
+Step 2800: 34 GSs duplicated, 3 GSs split. Now having 203979 GSs.
+Step 2800: 68 GSs pruned. Now having 203911 GSs.
+Step 2900: 20 GSs duplicated, 1 GSs split. Now having 203932 GSs.
+Step 2900: 57 GSs pruned. Now having 203875 GSs.
+Step 3000: 12 GSs duplicated, 2 GSs split. Now having 203889 GSs.
+Step 3000: 57 GSs pruned. Now having 203832 GSs.
+Step 3100: 0 GSs duplicated, 0 GSs split. Now having 203832 GSs.
+Step 3100: 30657 GSs pruned. Now having 173175 GSs.
+Step 3200: 10 GSs duplicated, 0 GSs split. Now having 173185 GSs.
+Step 3200: 1783 GSs pruned. Now having 171402 GSs.
+Step 3300: 10 GSs duplicated, 2 GSs split. Now having 171414 GSs.
+Step 3300: 474 GSs pruned. Now having 170940 GSs.
+Step 3400: 22 GSs duplicated, 4 GSs split. Now having 170966 GSs.
+Step 3400: 292 GSs pruned. Now having 170674 GSs.
+Step 3500: 31 GSs duplicated, 4 GSs split. Now having 170709 GSs.
+Step 3500: 284 GSs pruned. Now having 170425 GSs.
+Step 3600: 62 GSs duplicated, 16 GSs split. Now having 170503 GSs.
+Step 3600: 292 GSs pruned. Now having 170211 GSs.
+Step 3700: 36 GSs duplicated, 10 GSs split. Now having 170257 GSs.
+Step 3700: 269 GSs pruned. Now having 169988 GSs.
+Step 3800: 25 GSs duplicated, 9 GSs split. Now having 170022 GSs.
+Step 3800: 219 GSs pruned. Now having 169803 GSs.
+Step 3900: 75 GSs duplicated, 14 GSs split. Now having 169892 GSs.
+Step 3900: 188 GSs pruned. Now having 169704 GSs.
+Step 4000: 27 GSs duplicated, 11 GSs split. Now having 169742 GSs.
+Step 4000: 204 GSs pruned. Now having 169538 GSs.
+Step 4100: 34 GSs duplicated, 9 GSs split. Now having 169581 GSs.
+Step 4100: 156 GSs pruned. Now having 169425 GSs.
+Step 4200: 40 GSs duplicated, 5 GSs split. Now having 169470 GSs.
+Step 4200: 190 GSs pruned. Now having 169280 GSs.
+Step 4300: 49 GSs duplicated, 11 GSs split. Now having 169340 GSs.
+Step 4300: 181 GSs pruned. Now having 169159 GSs.
+Step 4400: 21 GSs duplicated, 6 GSs split. Now having 169186 GSs.
+Step 4400: 181 GSs pruned. Now having 169005 GSs.
+Step 4500: 26 GSs duplicated, 3 GSs split. Now having 169034 GSs.
+Step 4500: 179 GSs pruned. Now having 168855 GSs.
+Step 4600: 52 GSs duplicated, 5 GSs split. Now having 168912 GSs.
+Step 4600: 159 GSs pruned. Now having 168753 GSs.
+Step 4700: 54 GSs duplicated, 11 GSs split. Now having 168818 GSs.
+Step 4700: 158 GSs pruned. Now having 168660 GSs.
+Step 4800: 25 GSs duplicated, 3 GSs split. Now having 168688 GSs.
+Step 4800: 151 GSs pruned. Now having 168537 GSs.
+Step 4900: 41 GSs duplicated, 4 GSs split. Now having 168582 GSs.
+Step 4900: 187 GSs pruned. Now having 168395 GSs.
+Step 5000: 27 GSs duplicated, 6 GSs split. Now having 168428 GSs.
+Step 5000: 188 GSs pruned. Now having 168240 GSs.
+Step 5100: 26 GSs duplicated, 5 GSs split. Now having 168271 GSs.
+Step 5100: 158 GSs pruned. Now having 168113 GSs.
+Step 5200: 20 GSs duplicated, 2 GSs split. Now having 168135 GSs.
+Step 5200: 153 GSs pruned. Now having 167982 GSs.
+Step 5300: 37 GSs duplicated, 7 GSs split. Now having 168026 GSs.
+Step 5300: 161 GSs pruned. Now having 167865 GSs.
+Step 5400: 46 GSs duplicated, 6 GSs split. Now having 167917 GSs.
+Step 5400: 133 GSs pruned. Now having 167784 GSs.
+Step 5500: 44 GSs duplicated, 1 GSs split. Now having 167829 GSs.
+Step 5500: 132 GSs pruned. Now having 167697 GSs.
+Step 5600: 56 GSs duplicated, 10 GSs split. Now having 167763 GSs.
+Step 5600: 153 GSs pruned. Now having 167610 GSs.
+Step 5700: 38 GSs duplicated, 4 GSs split. Now having 167652 GSs.
+Step 5700: 154 GSs pruned. Now having 167498 GSs.
+Step 5800: 18 GSs duplicated, 3 GSs split. Now having 167519 GSs.
+Step 5800: 148 GSs pruned. Now having 167371 GSs.
+Step 5900: 43 GSs duplicated, 5 GSs split. Now having 167419 GSs.
+Step 5900: 135 GSs pruned. Now having 167284 GSs.
+Step 6000: 63 GSs duplicated, 7 GSs split. Now having 167354 GSs.
+Step 6000: 133 GSs pruned. Now having 167221 GSs.
+Step 6100: 5 GSs duplicated, 0 GSs split. Now having 167226 GSs.
+Step 6100: 14156 GSs pruned. Now having 153070 GSs.
+Step 6200: 29 GSs duplicated, 7 GSs split. Now having 153106 GSs.
+Step 6200: 496 GSs pruned. Now having 152610 GSs.
+Step 6300: 46 GSs duplicated, 7 GSs split. Now having 152663 GSs.
+Step 6300: 186 GSs pruned. Now having 152477 GSs.
+Step 6400: 37 GSs duplicated, 16 GSs split. Now having 152530 GSs.
+Step 6400: 138 GSs pruned. Now having 152392 GSs.
+Step 6500: 35 GSs duplicated, 10 GSs split. Now having 152437 GSs.
+Step 6500: 155 GSs pruned. Now having 152282 GSs.
+Step 6600: 47 GSs duplicated, 12 GSs split. Now having 152341 GSs.
+Step 6600: 156 GSs pruned. Now having 152185 GSs.
+Step 6700: 30 GSs duplicated, 18 GSs split. Now having 152233 GSs.
+Step 6700: 134 GSs pruned. Now having 152099 GSs.
+Step 6800: 89 GSs duplicated, 21 GSs split. Now having 152209 GSs.
+Step 6800: 129 GSs pruned. Now having 152080 GSs.
+Step 6900: 15 GSs duplicated, 1 GSs split. Now having 152096 GSs.
+Step 6900: 130 GSs pruned. Now having 151966 GSs.
+Step:  6999 {'mem': 5.0816497802734375, 'ellipse_time': 230.96913290023804, 'num_GS': 151966}
+Step 7000: 13 GSs duplicated, 2 GSs split. Now having 151981 GSs.
+Step 7000: 157 GSs pruned. Now having 151824 GSs.
+Step 7100: 33 GSs duplicated, 6 GSs split. Now having 151863 GSs.
+Step 7100: 115 GSs pruned. Now having 151748 GSs.
+Step 7200: 52 GSs duplicated, 12 GSs split. Now having 151812 GSs.
+Step 7200: 139 GSs pruned. Now having 151673 GSs.
+Step 7300: 26 GSs duplicated, 3 GSs split. Now having 151702 GSs.
+Step 7300: 150 GSs pruned. Now having 151552 GSs.
+Step 7400: 68 GSs duplicated, 8 GSs split. Now having 151628 GSs.
+Step 7400: 127 GSs pruned. Now having 151501 GSs.
+Step 7500: 62 GSs duplicated, 15 GSs split. Now having 151578 GSs.
+Step 7500: 131 GSs pruned. Now having 151447 GSs.
+Step 7600: 30 GSs duplicated, 5 GSs split. Now having 151482 GSs.
+Step 7600: 146 GSs pruned. Now having 151336 GSs.
+Step 7700: 34 GSs duplicated, 3 GSs split. Now having 151373 GSs.
+Step 7700: 139 GSs pruned. Now having 151234 GSs.
+Step 7800: 26 GSs duplicated, 7 GSs split. Now having 151267 GSs.
+Step 7800: 141 GSs pruned. Now having 151126 GSs.
+Step 7900: 49 GSs duplicated, 8 GSs split. Now having 151183 GSs.
+Step 7900: 152 GSs pruned. Now having 151031 GSs.
+Step 8000: 28 GSs duplicated, 9 GSs split. Now having 151068 GSs.
+Step 8000: 140 GSs pruned. Now having 150928 GSs.
+Step 8100: 43 GSs duplicated, 17 GSs split. Now having 150988 GSs.
+Step 8100: 126 GSs pruned. Now having 150862 GSs.
+Step 8200: 29 GSs duplicated, 11 GSs split. Now having 150902 GSs.
+Step 8200: 132 GSs pruned. Now having 150770 GSs.
+Step 8300: 41 GSs duplicated, 3 GSs split. Now having 150814 GSs.
+Step 8300: 117 GSs pruned. Now having 150697 GSs.
+Step 8400: 76 GSs duplicated, 6 GSs split. Now having 150779 GSs.
+Step 8400: 131 GSs pruned. Now having 150648 GSs.
+Step 8500: 87 GSs duplicated, 3 GSs split. Now having 150738 GSs.
+Step 8500: 128 GSs pruned. Now having 150610 GSs.
+Step 8600: 27 GSs duplicated, 1 GSs split. Now having 150638 GSs.
+Step 8600: 122 GSs pruned. Now having 150516 GSs.
+Step 8700: 36 GSs duplicated, 7 GSs split. Now having 150559 GSs.
+Step 8700: 155 GSs pruned. Now having 150404 GSs.
+Step 8800: 42 GSs duplicated, 4 GSs split. Now having 150450 GSs.
+Step 8800: 127 GSs pruned. Now having 150323 GSs.
+Step 8900: 29 GSs duplicated, 8 GSs split. Now having 150360 GSs.
+Step 8900: 133 GSs pruned. Now having 150227 GSs.
+Step 9000: 61 GSs duplicated, 12 GSs split. Now having 150300 GSs.
+Step 9000: 121 GSs pruned. Now having 150179 GSs.
+Step 9100: 6 GSs duplicated, 2 GSs split. Now having 150187 GSs.
+Step 9100: 4432 GSs pruned. Now having 145755 GSs.
+Step 9200: 40 GSs duplicated, 7 GSs split. Now having 145802 GSs.
+Step 9200: 301 GSs pruned. Now having 145501 GSs.
+Step 9300: 39 GSs duplicated, 4 GSs split. Now having 145544 GSs.
+Step 9300: 148 GSs pruned. Now having 145396 GSs.
+Step 9400: 26 GSs duplicated, 14 GSs split. Now having 145436 GSs.
+Step 9400: 140 GSs pruned. Now having 145296 GSs.
+Step 9500: 47 GSs duplicated, 3 GSs split. Now having 145346 GSs.
+Step 9500: 114 GSs pruned. Now having 145232 GSs.
+Step 9600: 65 GSs duplicated, 14 GSs split. Now having 145311 GSs.
+Step 9600: 101 GSs pruned. Now having 145210 GSs.
+Step 9700: 45 GSs duplicated, 9 GSs split. Now having 145264 GSs.
+Step 9700: 129 GSs pruned. Now having 145135 GSs.
+Step 9800: 57 GSs duplicated, 11 GSs split. Now having 145203 GSs.
+Step 9800: 128 GSs pruned. Now having 145075 GSs.
+Step 9900: 70 GSs duplicated, 13 GSs split. Now having 145158 GSs.
+Step 9900: 130 GSs pruned. Now having 145028 GSs.
+Step 10000: 69 GSs duplicated, 21 GSs split. Now having 145118 GSs.
+Step 10000: 97 GSs pruned. Now having 145021 GSs.
+Step 10100: 39 GSs duplicated, 2 GSs split. Now having 145062 GSs.
+Step 10100: 112 GSs pruned. Now having 144950 GSs.
+Step 10200: 26 GSs duplicated, 1 GSs split. Now having 144977 GSs.
+Step 10200: 95 GSs pruned. Now having 144882 GSs.
+Step 10300: 31 GSs duplicated, 0 GSs split. Now having 144913 GSs.
+Step 10300: 106 GSs pruned. Now having 144807 GSs.
+Step 10400: 35 GSs duplicated, 3 GSs split. Now having 144845 GSs.
+Step 10400: 93 GSs pruned. Now having 144752 GSs.
+Step 10500: 25 GSs duplicated, 1 GSs split. Now having 144778 GSs.
+Step 10500: 109 GSs pruned. Now having 144669 GSs.
+Step 10600: 38 GSs duplicated, 6 GSs split. Now having 144713 GSs.
+Step 10600: 93 GSs pruned. Now having 144620 GSs.
+Step 10700: 19 GSs duplicated, 21 GSs split. Now having 144660 GSs.
+Step 10700: 100 GSs pruned. Now having 144560 GSs.
+Step 10800: 19 GSs duplicated, 5 GSs split. Now having 144584 GSs.
+Step 10800: 112 GSs pruned. Now having 144472 GSs.
+Step 10900: 13 GSs duplicated, 5 GSs split. Now having 144490 GSs.
+Step 10900: 104 GSs pruned. Now having 144386 GSs.
+Step 11000: 39 GSs duplicated, 0 GSs split. Now having 144425 GSs.
+Step 11000: 105 GSs pruned. Now having 144320 GSs.
+Step 11100: 43 GSs duplicated, 3 GSs split. Now having 144366 GSs.
+Step 11100: 115 GSs pruned. Now having 144251 GSs.
+Step 11200: 61 GSs duplicated, 3 GSs split. Now having 144315 GSs.
+Step 11200: 94 GSs pruned. Now having 144221 GSs.
+Step 11300: 21 GSs duplicated, 10 GSs split. Now having 144252 GSs.
+Step 11300: 93 GSs pruned. Now having 144159 GSs.
+Step 11400: 34 GSs duplicated, 21 GSs split. Now having 144214 GSs.
+Step 11400: 85 GSs pruned. Now having 144129 GSs.
+Step 11500: 30 GSs duplicated, 8 GSs split. Now having 144167 GSs.
+Step 11500: 92 GSs pruned. Now having 144075 GSs.
+Step 11600: 32 GSs duplicated, 10 GSs split. Now having 144117 GSs.
+Step 11600: 93 GSs pruned. Now having 144024 GSs.
+Step 11700: 49 GSs duplicated, 5 GSs split. Now having 144078 GSs.
+Step 11700: 103 GSs pruned. Now having 143975 GSs.
+Step 11800: 89 GSs duplicated, 5 GSs split. Now having 144069 GSs.
+Step 11800: 89 GSs pruned. Now having 143980 GSs.
+Step 11900: 61 GSs duplicated, 6 GSs split. Now having 144047 GSs.
+Step 11900: 91 GSs pruned. Now having 143956 GSs.
+Step 12000: 25 GSs duplicated, 6 GSs split. Now having 143987 GSs.
+Step 12000: 85 GSs pruned. Now having 143902 GSs.
+Step 12100: 12 GSs duplicated, 3 GSs split. Now having 143917 GSs.
+Step 12100: 3392 GSs pruned. Now having 140525 GSs.
+Step 12200: 51 GSs duplicated, 13 GSs split. Now having 140589 GSs.
+Step 12200: 177 GSs pruned. Now having 140412 GSs.
+Step 12300: 22 GSs duplicated, 2 GSs split. Now having 140436 GSs.
+Step 12300: 102 GSs pruned. Now having 140334 GSs.
+Step 12400: 56 GSs duplicated, 12 GSs split. Now having 140402 GSs.
+Step 12400: 76 GSs pruned. Now having 140326 GSs.
+Step 12500: 58 GSs duplicated, 20 GSs split. Now having 140404 GSs.
+Step 12500: 89 GSs pruned. Now having 140315 GSs.
+Step 12600: 26 GSs duplicated, 18 GSs split. Now having 140359 GSs.
+Step 12600: 92 GSs pruned. Now having 140267 GSs.
+Step 12700: 56 GSs duplicated, 10 GSs split. Now having 140333 GSs.
+Step 12700: 96 GSs pruned. Now having 140237 GSs.
+Step 12800: 48 GSs duplicated, 5 GSs split. Now having 140290 GSs.
+Step 12800: 87 GSs pruned. Now having 140203 GSs.
+Step 12900: 70 GSs duplicated, 4 GSs split. Now having 140277 GSs.
+Step 12900: 82 GSs pruned. Now having 140195 GSs.
+Step 13000: 96 GSs duplicated, 23 GSs split. Now having 140314 GSs.
+Step 13000: 92 GSs pruned. Now having 140222 GSs.
+Step 13100: 39 GSs duplicated, 6 GSs split. Now having 140267 GSs.
+Step 13100: 77 GSs pruned. Now having 140190 GSs.
+Step 13200: 73 GSs duplicated, 10 GSs split. Now having 140273 GSs.
+Step 13200: 92 GSs pruned. Now having 140181 GSs.
+Step 13300: 65 GSs duplicated, 16 GSs split. Now having 140262 GSs.
+Step 13300: 88 GSs pruned. Now having 140174 GSs.
+Step 13400: 40 GSs duplicated, 11 GSs split. Now having 140225 GSs.
+Step 13400: 77 GSs pruned. Now having 140148 GSs.
+Step 13500: 29 GSs duplicated, 7 GSs split. Now having 140184 GSs.
+Step 13500: 78 GSs pruned. Now having 140106 GSs.
+Step 13600: 45 GSs duplicated, 12 GSs split. Now having 140163 GSs.
+Step 13600: 77 GSs pruned. Now having 140086 GSs.
+Step 13700: 43 GSs duplicated, 14 GSs split. Now having 140143 GSs.
+Step 13700: 89 GSs pruned. Now having 140054 GSs.
+Step 13800: 63 GSs duplicated, 7 GSs split. Now having 140124 GSs.
+Step 13800: 91 GSs pruned. Now having 140033 GSs.
+Step 13900: 90 GSs duplicated, 9 GSs split. Now having 140132 GSs.
+Step 13900: 89 GSs pruned. Now having 140043 GSs.
+Step 14000: 36 GSs duplicated, 1 GSs split. Now having 140080 GSs.
+Step 14000: 73 GSs pruned. Now having 140007 GSs.
+Step 14100: 46 GSs duplicated, 12 GSs split. Now having 140065 GSs.
+Step 14100: 87 GSs pruned. Now having 139978 GSs.
+Step 14200: 80 GSs duplicated, 6 GSs split. Now having 140064 GSs.
+Step 14200: 69 GSs pruned. Now having 139995 GSs.
+Step 14300: 26 GSs duplicated, 6 GSs split. Now having 140027 GSs.
+Step 14300: 69 GSs pruned. Now having 139958 GSs.
+Step 14400: 45 GSs duplicated, 16 GSs split. Now having 140019 GSs.
+Step 14400: 62 GSs pruned. Now having 139957 GSs.
+Step 14500: 52 GSs duplicated, 8 GSs split. Now having 140017 GSs.
+Step 14500: 65 GSs pruned. Now having 139952 GSs.
+Step 14600: 47 GSs duplicated, 4 GSs split. Now having 140003 GSs.
+Step 14600: 89 GSs pruned. Now having 139914 GSs.
+Step 14700: 63 GSs duplicated, 12 GSs split. Now having 139989 GSs.
+Step 14700: 83 GSs pruned. Now having 139906 GSs.
+Step 14800: 41 GSs duplicated, 15 GSs split. Now having 139962 GSs.
+Step 14800: 75 GSs pruned. Now having 139887 GSs.
+Step 14900: 52 GSs duplicated, 18 GSs split. Now having 139957 GSs.
+Step 14900: 82 GSs pruned. Now having 139875 GSs.
