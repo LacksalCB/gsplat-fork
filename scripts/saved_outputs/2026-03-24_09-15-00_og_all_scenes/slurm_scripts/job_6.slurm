@@ -18,7 +18,7 @@ nvidia-smi
 source ~/.bashrc
 export MPLBACKEND=agg
 
-cd /scratch/rhm4nj/gpu_arch/gsplat-fork/examples
+cd ~/gpu_6501/gsplat-fork/examples
 which nvcc
 
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | tr ' ' '_')

@@ -624,6 +624,7 @@ class Runner:
         Ks: Tensor,            # [C, 3, 3]
         width: int,
         height: int,
+        step: int,
         near_plane: float = 0.01,
     ) -> Tensor:
         """Return a boolean mask [N] — True for Gaussians visible in at least one camera.
@@ -661,12 +662,17 @@ class Runner:
 
         # Conservative pixel radius from the largest Gaussian axis
         f_max = torch.max(fx, fy)  # [C, 1]
-        r = f_max * max_scale.unsqueeze(0) / z_safe  # [C, N]
 
+        r =  1.5 * f_max * max_scale.unsqueeze(0) / z_safe  # [C, N]
+
+        # Epsilon smoothing 
+        e = 0.5 * max(width, height) if step < 10000 else 0.1 * max(width, height)
         in_frustum = (
             valid_depth
-            & (u + r > 0) & (u - r < width)
-            & (v + r > 0) & (v - r < height)
+            & (u + r > -e) 
+            & (u - r < width + e)
+            & (v + r > -e) 
+            & (v - r < height + e)
         )  # [C, N]
 
         # Keep a Gaussian if it's in frustum for ANY camera
@@ -684,11 +690,9 @@ class Runner:
         frame_idcs: Optional[Tensor] = None,
         camera_idcs: Optional[Tensor] = None,
         exposure: Optional[Tensor] = None,
-<<<<<<< HEAD
-=======
         external_buffers=None,
         cull_mask: Optional[Tensor] = None,
->>>>>>> 70a67cd00a604dd228d3ac6ab455de85a2b3fc4d
+
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         means = self.splats["means"]  # [N, 3]
@@ -697,10 +701,7 @@ class Runner:
         quats = self.splats["quats"]  # [N, 4]
         scales = torch.exp(self.splats["scales"])  # [N, 3]
         opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
-
-<<<<<<< HEAD
         image_ids = kwargs.pop("image_ids", None) 
-=======
         if cull_mask is not None:
             means = means[cull_mask]
             quats = quats[cull_mask]
@@ -716,7 +717,6 @@ class Runner:
                 external_buffers["render_alphas"],
                 external_buffers["info"]
             )
->>>>>>> 70a67cd00a604dd228d3ac6ab455de85a2b3fc4d
 
 
         if self.cfg.app_opt:
@@ -978,14 +978,18 @@ class Runner:
             nvtx.range_push("Forward_Rasterize")
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
 
+            WARMUP_STEPS = 4000
+            use_culling = cfg.enable_frustum_culling if step > WARMUP_STEPS else False
+
             # Pre-rendering frustum culling (CLM paper §5.1): drop Gaussians
-            # that are outside the view frustum before rasterization.
-            if cfg.enable_frustum_culling:
+            # that are outside the view frustum before rasterization
+            if use_culling:
                 cull_mask = self.frustum_cull(
                     camtoworlds=camtoworlds,
                     Ks=Ks,
                     width=width,
                     height=height,
+                    step=step,
                     near_plane=cfg.near_plane,
                 )
             else:
@@ -1005,11 +1009,8 @@ class Runner:
                 masks=masks,
                 camera_idcs=camera_idcs,
                 exposure=exposure,
-<<<<<<< HEAD
-=======
                 external_buffers=None, # NEVER use cached output buffers here
                 cull_mask=cull_mask,
->>>>>>> 70a67cd00a604dd228d3ac6ab455de85a2b3fc4d
             )
             
             if renders.shape[-1] == 4:
@@ -1083,6 +1084,36 @@ class Runner:
                 desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
     
+             # --- STRATEGY POST-BACKWARD (Densification/MCMC) ---
+            nvtx.range_push("Strategy_Post_Backward")
+          
+            base_thresh = 0.0002
+
+            if hasattr(cfg.strategy, "densify_grad_thresh"):
+                if step < WARMUP_STEPS:
+                    cfg.strategy.densify_grad_thresh = base_thresh * 0.5
+                else:
+                    cfg.strategy.densify_grad_thresh = base_thresh
+            else:
+                pass
+
+            if optimizer_stride > 1:
+                for v in info.values():
+                    if isinstance(v, torch.Tensor) and v.grad is not None:
+                        v.grad.mul_(optimizer_stride)
+
+            cfg.strategy.step_post_backward(
+                params=self.splats,
+                optimizers=self.optimizers,
+                state=self.strategy_state,
+                step=step,
+                info=info,
+                packed=cfg.packed,
+            )
+
+            cfg.strategy.densify_grad_threshold = base_thresh 
+            nvtx.range_pop()
+
             # --- OPTIMIZER STEP ---
             if (step+1) % optimizer_stride == 0:
                 nvtx.range_push("Optimizer_Update")
@@ -1092,19 +1123,6 @@ class Runner:
                 for scheduler in schedulers:
                     scheduler.step()
                 nvtx.range_pop()
-                
-
-            # --- STRATEGY POST-BACKWARD (Densification/MCMC) ---
-            nvtx.range_push("Strategy_Post_Backward")
-            cfg.strategy.step_post_backward(
-                params=self.splats,
-                optimizers=self.optimizers,
-                state=self.strategy_state,
-                step=step,
-                info=info,
-                packed=cfg.packed,
-            )
-            nvtx.range_pop()
     
             # END NVTX ITERATION BLOCK
             nvtx.range_pop()

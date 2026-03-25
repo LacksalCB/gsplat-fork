@@ -9,7 +9,9 @@
 #SBATCH --error=/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-24_09-15-00_og_all_scenes/slurm_err/%x-%j.err
 #SBATCH --constraint="a6000"
 
-module purge
+BASE_DIR=~/gpu_6501/gsplat-fork
+
+
 module load cuda
 module load nsight-systems
 
@@ -18,12 +20,12 @@ nvidia-smi
 source ~/.bashrc
 export MPLBACKEND=agg
 
-cd /scratch/rhm4nj/gpu_arch/gsplat-fork/examples
+cd $BASE_DIR/examples
 which nvcc
 
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | tr ' ' '_')
-ENV_NAME="a6000-env"
-ENV_DIR="/scratch/rhm4nj/gpu_arch/envs/$ENV_NAME"
+ENV_NAME=".venv"
+ENV_DIR="$BASE_DIR/$ENV_NAME"
 
 echo "GPU: $GPU_NAME"
 echo "Env: $ENV_DIR"
@@ -43,8 +45,8 @@ time nsys profile \
     --trace=cuda,osrt,nvtx \
     --sample=cpu \
     --force-overwrite=true \
-    --output=/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-24_09-15-00_og_all_scenes/results/profile_gsplat_s-kitchen \
-    bash /scratch/rhm4nj/gpu_arch/gsplat-fork/examples/benchmarks/basic_mod.sh \
+    --output=$BASE_DIR/scripts/slurm/outputs/2026-03-24_09-15-00_og_all_scenes/results/profile_gsplat_s-kitchen \
+    bash $BASE_DIR/examples/benchmarks/basic_mod.sh \
     kitchen \
-    /scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-24_09-15-00_og_all_scenes/results/profile_gsplat_s-kitchen \
+    $BASE_DIR/scripts/slurm/outputs/2026-03-24_09-15-00_og_all_scenes/results/profile_gsplat_s-kitchen \
     
