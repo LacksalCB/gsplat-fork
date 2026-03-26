@@ -32,8 +32,8 @@ import pandas as pd
 # PARAMETERS — edit these
 # =============================================================================
 
-NSYS_DIR   = Path("/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-19_05-49-44_ablations/results")
-OUTPUT_CSV = Path("nsys_mem_table.csv")
+NSYS_DIR   = Path("/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-25_23-16-52_ablations/results")
+OUTPUT_CSV = NSYS_DIR / "nsys_mem_table.csv"
 MAX_WORKERS = 8
 
 # =============================================================================

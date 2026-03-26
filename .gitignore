@@ -6,13 +6,16 @@ examples/results/*
 *.nfs*
 .venv/
 gsplat/csrc.so
-*.nsys-rep
+*events.out.tfevents.*
 
 *.nsys-rep
 *.qdstrm
 *.sqlite
 *.egg-info
 core.*
+*.pt
+*.mp4
+*.png
 
 *nsys_stats_summary*
 
@@ -22,7 +25,6 @@ gsplat/csrc.so
 build/
 cuda_12.1.0_530.30.02_linux.run
 
-*.nsys-rep
 */.nfs00000000024ff9e20000019a
 gsplat/csrc.so
 
