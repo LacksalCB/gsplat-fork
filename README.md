@@ -4,7 +4,6 @@ Our primary objective is to address the runtime and VRAM usage bottlenecks of th
 
 ## Current Work
 
-Software Caching:
 - Implemented basic cache + LRU which reduced runtime by 15% and HtoD bandwidth from ~300GB/s to 120GB/s. 
 - Implemented frustum culling which reduced runtime by an additional 30% and Reduced HtoD and DtoD by ~100% and ~25% respectively
 - Added ADAM optimizizer stride accumulation which reduces runtime (in most cases) linearly with stride size with a minimal PSNR reduction
