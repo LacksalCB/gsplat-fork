@@ -1,4 +1,16 @@
-# gsplat
+# GSPLAT Update for CS 6501: GPU Architectures (Christian Benjamin and Raffi Khondaker)
+
+Our primary objective is to address the runtime and VRAM usage bottlenecks of this 3DGS implementations.  The primary issues of gsplat and the inria implementations is that they can easily use 10s of Gigabytes of memory and takes 40+ minutes to execute.  Via a software managed cache and improved pipeline architecture, we plan to cut runtime significantly and reduce peak VRAM usage while maintaining acceptable output image quality scores.
+
+## Current Work
+
+Software Caching:
+- Implemented basic cache + LRU which reduced runtime by 15% and HtoD bandwidth from ~300GB/s to 120GB/s. 
+- Implemented frustum culling which reduced runtime by an additional 30% and Reduced HtoD and DtoD by ~100% and ~25% respectively
+- Added ADAM optimizizer stride accumulation which reduces runtime (in most cases) linearly with stride size with a minimal PSNR reduction
+
+
+# [DEPRECATED FROM FORK]: gsplat
 
 [![Core Tests.](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml)
 [![Docs](https://github.com/nerfstudio-project/gsplat/actions/workflows/doc.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/doc.yml)

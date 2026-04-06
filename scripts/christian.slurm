@@ -2,10 +2,16 @@
 
 BASE_DIR=~/gpu_6501/gsplat-fork
 TIME=$(date +%y%m%d_%h%m%s)
-INPUT=$1
 OUTPUT=${TIME}/results/profile_gsplat-$1
 RESULT_DIR="${BASE_DIR}/examples/results_slurm/gsplat_results_${TIME}"
 
+
+DEFAULTS=(bicycle bonsai counter garden kitchen room stump) 
+if [ "$#" -eq 0 ]; then
+    INPUTS=("${DEFAULTS[@]}")
+else
+	INPUTS=("$@")
+fi
 
 module load cuda
 module load nsight-systems
@@ -36,16 +42,20 @@ pwd
 
 export OMP_NUM_THREADS=4
 
-time nsys profile \
-    --trace=cuda,osrt,nvtx \
-    --sample=cpu \
-    --force-overwrite=true \
-    --output=$BASE_DIR/scripts/slurm/outputs/$OUTPUT \
-    bash $BASE_DIR/examples/benchmarks/custom_mod.sh \
-    	$1 \
-    	$BASE_DIR/scripts/slurm/outputs/$OUTPUT \
-		2 \
-		--optimizer-stride 4 \
-		--enable-frustum-culling \
-		--enable-input-cache
-    
+
+for INPUT in "${INPUTS[@]}"; do
+	time nsys profile \
+    	--trace=cuda,osrt,nvtx \
+		--cuda-memory-usage=true \
+    	--sample=cpu \
+    	--force-overwrite=true \
+    	--output=$BASE_DIR/scripts/slurm/outputs/$OUTPUT \
+    	bash $BASE_DIR/examples/benchmarks/custom_mod.sh \
+    		$INPUT \
+    		$BASE_DIR/scripts/slurm/outputs/$OUTPUT \
+			2 \
+			--optimizer-stride 4 \
+			--enable-frustum-culling \
+			--enable-input-cache
+ 
+done   
