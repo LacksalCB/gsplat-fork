@@ -47,4 +47,5 @@ time nsys profile \
     bash {script_path} \
     {scenes} \
     {profile_output} \
+    {gpu_num} \
     {args}

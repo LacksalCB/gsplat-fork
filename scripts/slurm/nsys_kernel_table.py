@@ -32,8 +32,8 @@ import pandas as pd
 # PARAMETERS — edit these
 # =============================================================================
 
-NSYS_DIR   = Path("/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-19_05-49-44_ablations/results")
-OUTPUT_CSV = Path("nsys_mem_table.csv")
+NSYS_DIR   = Path("/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-25_23-16-52_ablations/results")
+OUTPUT_CSV = NSYS_DIR / "nsys_mem_table.csv"
 MAX_WORKERS = 8
 
 # =============================================================================
@@ -58,8 +58,26 @@ MEMSET_QUERY = """
     FROM CUPTI_ACTIVITY_KIND_MEMSET
 """
 
-METRICS = ["Total Time (ns)", "Instances", "Bandwidth (GB/s)"]
-OPS     = ["Memset", "HtoD", "DtoH", "DtoD"]
+# Kernel utilization: fraction of time the GPU was executing kernels
+GPU_UTIL_QUERY = """
+    SELECT
+        SUM(end - start)      AS total_kernel_ns,
+        MAX(end) - MIN(start) AS span_ns
+    FROM CUPTI_ACTIVITY_KIND_KERNEL
+"""
+
+# Peak VRAM: reconstruct from allocation/deallocation events
+# isAlloc=1 means allocation, 0 means free
+VRAM_QUERY = """
+    SELECT bytes, isAlloc
+    FROM CUPTI_ACTIVITY_KIND_MEMORY2
+    ORDER BY timestamp
+"""
+
+METRICS     = ["Total Time (ns)", "Instances", "Bandwidth (GB/s)"]
+OPS         = ["Memset", "HtoD", "DtoH", "DtoD"]
+GPU_METRICS = ["Utilization (%)", "Peak VRAM (MB)"]
+GPU_OPS     = ["GPU"]
 
 
 def compute_bandwidth(total_bytes, total_time_ns):
@@ -69,8 +87,9 @@ def compute_bandwidth(total_bytes, total_time_ns):
     return (total_bytes / 1e9) / (total_time_ns * 1e-9)
 
 
-def query_sqlite(sqlite_path: Path) -> dict:
-    result = {op: {m: None for m in METRICS} for op in OPS}
+def query_sqlite(sqlite_path: Path) -> tuple[dict, dict]:
+    mem_result = {op: {m: None for m in METRICS} for op in OPS}
+    gpu_result = {op: {m: None for m in GPU_METRICS} for op in GPU_OPS}
     try:
         con = sqlite3.connect(sqlite_path)
 
@@ -80,9 +99,9 @@ def query_sqlite(sqlite_path: Path) -> dict:
                 kind_name = COPY_KINDS.get(int(row[0]))
                 if kind_name:
                     total_time_ns, instances, total_bytes = row[1], row[2], row[3]
-                    result[kind_name]["Total Time (ns)"]  = float(total_time_ns) if total_time_ns is not None else None
-                    result[kind_name]["Instances"]        = float(instances)     if instances     is not None else None
-                    result[kind_name]["Bandwidth (GB/s)"] = compute_bandwidth(total_bytes, total_time_ns)
+                    mem_result[kind_name]["Total Time (ns)"]  = float(total_time_ns) if total_time_ns is not None else None
+                    mem_result[kind_name]["Instances"]        = float(instances)     if instances     is not None else None
+                    mem_result[kind_name]["Bandwidth (GB/s)"] = compute_bandwidth(total_bytes, total_time_ns)
         except Exception as e:
             print(f"  [WARN] memcpy query failed in {sqlite_path.name}: {e}", file=sys.stderr)
 
@@ -91,26 +110,52 @@ def query_sqlite(sqlite_path: Path) -> dict:
             row = con.execute(MEMSET_QUERY).fetchone()
             if row:
                 total_time_ns, instances, total_bytes = row[0], row[1], row[2]
-                result["Memset"]["Total Time (ns)"]  = float(total_time_ns) if total_time_ns is not None else None
-                result["Memset"]["Instances"]        = float(instances)     if instances     is not None else None
-                result["Memset"]["Bandwidth (GB/s)"] = compute_bandwidth(total_bytes, total_time_ns)
+                mem_result["Memset"]["Total Time (ns)"]  = float(total_time_ns) if total_time_ns is not None else None
+                mem_result["Memset"]["Instances"]        = float(instances)     if instances     is not None else None
+                mem_result["Memset"]["Bandwidth (GB/s)"] = compute_bandwidth(total_bytes, total_time_ns)
         except Exception as e:
             print(f"  [WARN] memset query failed in {sqlite_path.name}: {e}", file=sys.stderr)
+
+        # --- GPU utilization (kernel time / total span) ---
+        try:
+            row = con.execute(GPU_UTIL_QUERY).fetchone()
+            if row and row[0] is not None and row[1] and row[1] > 0:
+                gpu_result["GPU"]["Utilization (%)"] = float(row[0]) / float(row[1]) * 100.0
+        except Exception as e:
+            print(f"  [WARN] GPU util query failed in {sqlite_path.name}: {e}", file=sys.stderr)
+
+        # --- Peak VRAM (from allocation/free events) ---
+        try:
+            rows = con.execute(VRAM_QUERY).fetchall()
+            running, peak = 0, 0
+            for bytes_, is_alloc in rows:
+                if bytes_ is None:
+                    continue
+                running += bytes_ if is_alloc else -bytes_
+                if running > peak:
+                    peak = running
+            if peak > 0:
+                gpu_result["GPU"]["Peak VRAM (MB)"] = peak / 1e6
+        except Exception as e:
+            print(f"  [WARN] VRAM query failed in {sqlite_path.name}: {e}", file=sys.stderr)
 
         con.close()
     except Exception as e:
         print(f"  [WARN] Failed to open {sqlite_path.name}: {e}", file=sys.stderr)
 
-    return result
+    return mem_result, gpu_result
 
 
 def process(sqlite_path: Path) -> tuple[str, dict]:
     print(f"Processing {sqlite_path.name} ...")
-    op_data = query_sqlite(sqlite_path)
+    mem_data, gpu_data = query_sqlite(sqlite_path)
     row_data = {}
     for op in OPS:
         for metric in METRICS:
-            row_data[(op, metric)] = op_data[op][metric]
+            row_data[(op, metric)] = mem_data[op][metric]
+    for op in GPU_OPS:
+        for metric in GPU_METRICS:
+            row_data[(op, metric)] = gpu_data[op][metric]
     return sqlite_path.stem, row_data
 
 
@@ -122,7 +167,8 @@ def build_table(nsys_dir: Path) -> pd.DataFrame:
         print("  for f in *.nsys-rep; do nsys export --type sqlite --force-overwrite true \"$f\" & done && wait", file=sys.stderr)
         sys.exit(1)
 
-    col_tuples = [(op, m) for op in OPS for m in METRICS]
+    col_tuples = [(op, m) for op in OPS for m in METRICS] + \
+                 [(op, m) for op in GPU_OPS for m in GPU_METRICS]
     columns    = pd.MultiIndex.from_tuples(col_tuples, names=["operation", "metric"])
 
     records = {}
