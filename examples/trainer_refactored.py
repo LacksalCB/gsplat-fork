@@ -5,8 +5,6 @@ import os
 # handle cache eviction clearing
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256"
 
-#Temp issue
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import time
 from collections import defaultdict, OrderedDict
 from dataclasses import dataclass, field
@@ -49,31 +47,55 @@ from nerfview import CameraState, RenderTabState, apply_float_colormap
 import torch.cuda.profiler as profiler
 import torch.cuda.nvtx as nvtx
 
-# AI slop mockup
-class GSCacheManager:
-    def __init__(self, vram_thresh_gb=18.5):
-        self.limit = vram_thresh_gb * 1024 * 8
-        self.cache = {}
 
+# Raw image software cacher with LRU eviction 
+# Impractical to use scratchpad due to data size and access pattern,
+# So it's a simple VRAM glob-mem OrderedDict()
+class GSCacheManager:
+    # Adjust threshold to limit how much VRAM cache can take up
+    def __init__(self, vram_thresh_gb=18.5):
+        self.limit_bytes = int(vram_thresh_gb * (1024 ** 3)) #input GB to bytes conversion
+        self.cache = OrderedDict()
+        self.entry_sizes = {}   
+        self.current_bytes = 0
         self.transfer_stream = torch.cuda.Stream()
+ 
+    def _entry_bytes(self, entry):
+        return sum(
+            v.element_size() * v.numel()
+            for v in entry.values()
+            if isinstance(v, torch.Tensor)
+        )
 
     def get_cache(self, view_id, compute_func):
+        # Hit: Update LRU
         if view_id in self.cache:
+            self.cache.move_to_end(view_id)
             entry = self.cache[view_id]
-            # Move to main device using the transfer stream
             with torch.cuda.stream(self.transfer_stream):
                 for k, v in entry.items():
                     if isinstance(v, torch.Tensor):
-                        # non_blocking=True allows the CPU to keep running
                         entry[k] = v.to("cuda", non_blocking=True)
             return entry
 
+        # Miss: compute new entry
         new_entry = compute_func()
+        entry_bytes = self._entry_bytes(new_entry)
+
+        # Eviction Policy
+        while self.current_bytes + entry_bytes > self.limit_bytes and self.cache:
+            lru_id, _ = self.cache.popitem(last=False)
+            self.current_bytes -= self.entry_sizes.pop(lru_id)
+
         self.cache[view_id] = new_entry
+        self.entry_sizes[view_id] = entry_bytes
+        self.current_bytes += entry_bytes
         return new_entry
 
     def purge_all(self):
         self.cache.clear()
+        self.entry_sizes.clear()
+        self.current_bytes = 0
         torch.cuda.empty_cache()
 
 @dataclass
@@ -164,6 +186,14 @@ class Config:
 
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
+
+    # Ablation flags
+    # Number of steps to accumulate gradients before optimizer step (1 = every step, i.e. no accumulation)
+    optimizer_stride: int = 4
+    # Enable pre-rasterization frustum culling
+    enable_frustum_culling: bool = False
+    # Enable LRU input cache to skip repeated CPU->GPU transfers
+    enable_input_cache: bool = False
 
     # LR for 3D point positions
     means_lr: float = 1.6e-4
@@ -588,6 +618,68 @@ class Runner:
         self._gaussians_frozen = True
         print("[Distillation] Gaussian parameters frozen")
 
+    # Frustum Culling from CLM paper
+    @torch.no_grad()
+    def frustum_cull(
+        self,
+        camtoworlds: Tensor,  # [C, 4, 4]
+        Ks: Tensor,            # [C, 3, 3]
+        width: int,
+        height: int,
+        step: int,
+        near_plane: float = 0.01,
+    ) -> Tensor:
+        """Return a boolean mask [N] — True for Gaussians visible in at least one camera.
+
+        Uses the conservative radius approach from the CLM paper (§5.1):
+        project each Gaussian center into camera space, compute a pixel-space
+        radius from the largest scale, and keep the Gaussian if the bounding
+        circle overlaps the image for any camera in the batch.
+        """
+        means = self.splats["means"]          # [N, 3]
+        scales = torch.exp(self.splats["scales"])  # [N, 3]
+        max_scale = scales.max(dim=-1).values  # [N]
+
+        # viewmats: [C, 4, 4]  (world-to-camera)
+        viewmats = torch.linalg.inv(camtoworlds)  # [C, 4, 4]
+        R = viewmats[:, :3, :3]  # [C, 3, 3]
+        t = viewmats[:, :3, 3]   # [C, 3]
+
+        # p_cam: [C, N, 3]
+        p_cam = (R @ means.T).permute(0, 2, 1) + t.unsqueeze(1)  # [C, N, 3]
+        z = p_cam[..., 2]  # [C, N]
+
+        # Only consider Gaussians in front of the near plane
+        valid_depth = z > near_plane  # [C, N]
+
+        # Project to image space
+        fx = Ks[:, 0, 0].unsqueeze(1)  # [C, 1]
+        fy = Ks[:, 1, 1].unsqueeze(1)
+        cx = Ks[:, 0, 2].unsqueeze(1)
+        cy = Ks[:, 1, 2].unsqueeze(1)
+
+        z_safe = z.clamp(min=1e-6)
+        u = fx * p_cam[..., 0] / z_safe + cx  # [C, N]
+        v = fy * p_cam[..., 1] / z_safe + cy  # [C, N]
+
+        # Conservative pixel radius from the largest Gaussian axis
+        f_max = torch.max(fx, fy)  # [C, 1]
+
+        r =  1.5 * f_max * max_scale.unsqueeze(0) / z_safe  # [C, N]
+
+        # Epsilon smoothing to handle Gaussians near Frustum edge 
+        e = 0.5 * max(width, height) if step < 10000 else 0.1 * max(width, height)
+        in_frustum = (
+            valid_depth
+            & (u + r > -e) 
+            & (u - r < width + e)
+            & (v + r > -e) 
+            & (v - r < height + e)
+        )  # [C, N]
+
+        # Keep a Gaussian if it's in frustum for ANY camera
+        return in_frustum.any(dim=0)  # [N]
+
     def rasterize_splats(
         self,
         camtoworlds: Tensor,
@@ -601,6 +693,8 @@ class Runner:
         camera_idcs: Optional[Tensor] = None,
         exposure: Optional[Tensor] = None,
         external_buffers=None,
+        cull_mask: Optional[Tensor] = None,
+
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         means = self.splats["means"]  # [N, 3]
@@ -609,11 +703,17 @@ class Runner:
         quats = self.splats["quats"]  # [N, 4]
         scales = torch.exp(self.splats["scales"])  # [N, 3]
         opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
-
+        image_ids = kwargs.pop("image_ids", None) 
+        if cull_mask is not None:
+            means = means[cull_mask]
+            quats = quats[cull_mask]
+            scales = scales[cull_mask]
+            opacities = opacities[cull_mask]
+    
+        # Check if image in cache before raster (from update)
         image_ids = kwargs.pop("image_ids", None)
         if external_buffers is not None:
-            # If we have a hit, we skip the GPU work and return the cached tensors.
-            # 'info' contains the binning/sorting data needed for the backward pass.
+            # i.e. if in cache, use cache
             return (
                 external_buffers["render_colors"],
                 external_buffers["render_alphas"],
@@ -622,16 +722,20 @@ class Runner:
 
 
         if self.cfg.app_opt:
+            features = self.splats["features"] if cull_mask is None else self.splats["features"][cull_mask]
+            splat_colors = self.splats["colors"] if cull_mask is None else self.splats["colors"][cull_mask]
             colors = self.app_module(
-                features=self.splats["features"],
+                features=features,
                 embed_ids=image_ids,
                 dirs=means[None, :, :] - camtoworlds[:, None, :3, 3],
                 sh_degree=kwargs.pop("sh_degree", self.cfg.sh_degree),
             )
-            colors = colors + self.splats["colors"]
+            colors = colors + splat_colors
             colors = torch.sigmoid(colors)
         else:
-            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+            sh0 = self.splats["sh0"] if cull_mask is None else self.splats["sh0"][cull_mask]
+            shN = self.splats["shN"] if cull_mask is None else self.splats["shN"][cull_mask]
+            colors = torch.cat([sh0, shN], 1)  # [N, K, 3]
 
         if rasterize_mode is None:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
@@ -706,7 +810,7 @@ class Runner:
 
         return render_colors, render_alphas, info
 
-
+    # Helper to handle raster calls
     def prepare_rasterization_buffers(self, step, camtoworlds, Ks, width, height, image_ids, camera_idcs, exposure, masks):
         # Determine SH degree for this specific step
         sh_degree_to_use = min(step // self.cfg.sh_degree_interval, self.cfg.sh_degree)
@@ -725,7 +829,6 @@ class Runner:
             masks=masks,
             camera_idcs=camera_idcs,
             exposure=exposure,
-            external_buffers=None # CRITICAL: Must be None to actually render!
         )
 
         # Return keys that match the internal rasterizer's expectations
@@ -735,7 +838,7 @@ class Runner:
             "render_alphas": alphas.detach()
         }
 
-
+    # Custom trainer method to improve runtime and VRAM usage over base NerfStudios gsplat trainer
     def train(self):
         cfg = self.cfg
         device = self.device
@@ -746,7 +849,7 @@ class Runner:
         if not hasattr(self, 'cache_manager'):
             self.cache_manager = GSCacheManager(vram_thresh_gb=18.5)
 
-        # 1. Setup Logging & Schedulers
+        # 1. Dump Config (From Gsplat) ------------------------------------
         if world_rank == 0:
             with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
                 yaml.dump(vars(cfg), f)
@@ -754,181 +857,6 @@ class Runner:
         max_steps = cfg.max_steps
         init_step = 0
         
-        # Scheduling logic restored from original
-        schedulers = [
-            torch.optim.lr_scheduler.ExponentialLR(
-                self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
-            ),
-        ]
-        # ... (Include pose_opt/post_processing schedulers here as in original)
-    
-        # 2. Data Loader Setup
-        trainloader = torch.utils.data.DataLoader(
-            self.trainset, batch_size=cfg.batch_size, shuffle=True,
-            num_workers=4, persistent_workers=True, pin_memory=True,
-        )
-        trainloader_iter = iter(trainloader)
-    
-        # 3. Profiling Configuration
-        # Capture a 10-step window to keep .nsys-rep file size manageable
-        profile_start, profile_stop = 0, 30000
-        global_tic = time.time()
-        pbar = tqdm.tqdm(range(init_step, max_steps))
-   
-        optimizer_stride = 4
-
-        for step in pbar:
-            # Trigger Nsight Profiler API
-            if step == profile_start:
-                profiler.start()
-    
-            # START NVTX ITERATION BLOCK
-            nvtx.range_push(f"Iteration_{step}")
-    
-            nvtx.range_push("Data_Loading")
-            try:
-                data = next(trainloader_iter)
-            except StopIteration:
-                trainloader_iter = iter(trainloader)
-                data = next(trainloader_iter)
-            
-            view_id = data["image_id"][0].item()
-
-            # CACHE ONLY THE RAW INPUTS (Images, Cameras, Masks)
-            # This avoids slow Disk -> CPU -> GPU transfers on subsequent epochs
-            cached_data = self.cache_manager.get_cache(
-                view_id,
-                lambda: {
-                    "pixels": data["image"].to(device) / 255.0,
-                    "camtoworlds": data["camtoworld"].to(device),
-                    "Ks": data["K"].to(device),
-                    "image_ids": data["image_id"].to(device),
-                    "camera_idcs": data["camera_idx"].to(device),
-                    "masks": data.get("mask").to(device) if data.get("mask") is not None else None,
-                    "exposure": data.get("exposure").to(device) if "exposure" in data else None
-                }
-            )
-            
-            # Pull inputs from cache
-            pixels = cached_data["pixels"]
-            camtoworlds = cached_data["camtoworlds"]
-            Ks = cached_data["Ks"]
-            image_ids = cached_data["image_ids"]
-            camera_idcs = cached_data["camera_idcs"]
-            masks = cached_data["masks"]
-            exposure = cached_data["exposure"]
-
-            height, width = pixels.shape[1:3]
-            
-            torch.cuda.current_stream().wait_stream(self.cache_manager.transfer_stream)
-            nvtx.range_pop()
-
-            # --- FORWARD PASS (ALWAYS FRESH) ---
-            nvtx.range_push("Forward_Rasterize")
-            sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
-            
-            # We call this FRESH so 'info' has active gradients for densification
-            renders, alphas, info = self.rasterize_splats(
-                camtoworlds=camtoworlds,
-                Ks=Ks,
-                width=width,
-                height=height,
-                sh_degree=sh_degree_to_use,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                image_ids=image_ids,
-                render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                masks=masks,
-                camera_idcs=camera_idcs,
-                exposure=exposure,
-                external_buffers=None # NEVER use cached output buffers here
-            )
-            
-            colors = renders
-
-            nvtx.range_pop()
-    
-            # --- STRATEGY PRE-BACKWARD (Accumulate Stats) ---
-            nvtx.range_push("Strategy_Pre_Backward")
-            self.cfg.strategy.step_pre_backward(
-                params=self.splats, optimizers=self.optimizers,
-                state=self.strategy_state, step=step, info=info,
-            )
-            nvtx.range_pop()
-    
-            # --- LOSS & BACKWARD ---
-            nvtx.range_push("Loss_and_Backward")
-            l1loss = F.l1_loss(colors, pixels)
-            # Assuming fused_ssim is imported
-            ssimloss = 1.0 - fused_ssim(colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2))
-            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
-            lose = loss/optimizer_stride
-            
-            loss.backward()
-            nvtx.range_pop()
-    
-            # --- OPTIMIZER STEP ---
-            if (step+1) % optimizer_stride == 0:
-                nvtx.range_push("Optimizer_Update")
-                for optimizer in self.optimizers.values():
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                for scheduler in schedulers:
-                    scheduler.step()
-                nvtx.range_pop()
-                
-
-            # --- STRATEGY POST-BACKWARD (Densification/MCMC) ---
-            nvtx.range_push("Strategy_Post_Backward")
-        
-            strategy = cfg.strategy
-            is_refinement_step = (
-                step >= strategy.refine_start_iter and 
-                step <= strategy.refine_stop_iter and 
-                step % strategy.refine_every == 0
-            )
-            
-            if is_refinement_step:
-                current_count = self.splats['means'].shape[0]
-                
-                if current_count < 4_500_000:
-                    self.cache_manager.purge_all()
-                    
-                    strategy.step_post_backward(
-                        params=self.splats, 
-                        optimizers=self.optimizers,
-                        state=self.strategy_state, 
-                        step=step, 
-                        info=info, 
-                        packed=cfg.packed
-                    )
-
-            nvtx.range_pop()
-    
-            # END NVTX ITERATION BLOCK
-            nvtx.range_pop() 
-    
-            # Stop Profiler and break early for benchmark efficiency
-            if step == profile_stop:
-                profiler.stop()
-                print(f"Profiling complete. Captured steps {profile_start} to {profile_stop}.")
-                break
-    
-    """
-    def train(self):
-        cfg = self.cfg
-        device = self.device
-        world_rank = self.world_rank
-        world_size = self.world_size
-
-        # Dump cfg.
-        if world_rank == 0:
-            with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
-                yaml.dump(vars(cfg), f)
-
-        max_steps = cfg.max_steps
-        init_step = 0
-
         schedulers = [
             # means has a learning rate schedule, that end at 0.01 of the initial value
             torch.optim.lr_scheduler.ExponentialLR(
@@ -966,26 +894,35 @@ class Runner:
                 max_optimization_iters=max_steps,
             )
             schedulers.extend(ppisp_schedulers)
+        # End cfg setup/dump (from gsplat) ------------------------------------
 
+        # 2. Data Loader Setup (from gsplat) ----------------------------------
         trainloader = torch.utils.data.DataLoader(
-            self.trainset,
-            batch_size=cfg.batch_size,
+            self.trainset, 
+            batch_size=cfg.batch_size, 
             shuffle=True,
-            num_workers=4,
-            persistent_workers=True,
+            num_workers=4, 
+            persistent_workers=True, 
             pin_memory=True,
         )
         trainloader_iter = iter(trainloader)
+        # End Data Loader (from gsplat) ---------------------------------------
 
-        # Training loop.
+        # 3. Profiling Setup with nsys 
+        profile_start, profile_stop = 0, max_steps + 1
+
+         # Set optimizer stride from cfg 
+        # Sets how many steps optimizer acummulates gradients before updating learned parameters
+        # Higher stride somewhat reduces runtime, but has PSNR cost
+        optimizer_stride = cfg.optimizer_stride
+
+        # Training Loop
         global_tic = time.time()
         pbar = tqdm.tqdm(range(init_step, max_steps))
         for step in pbar:
-            if not cfg.disable_viewer:
-                while self.viewer.state == "paused":
-                    time.sleep(0.01)
-                self.viewer.lock.acquire()
-                tic = time.time()
+            # Start nsys profiler
+            if step == profile_start:
+                profiler.start()
 
             # Freeze Gaussians when PPISP controller distillation starts
             if (
@@ -996,39 +933,88 @@ class Runner:
             ):
                 self.freeze_gaussians()
 
+            # NTVX step counter
+            nvtx.range_push(f"Iteration_{step}")
+    
+            # NTVX Range 1: Data Loading
+            nvtx.range_push("Data_Loading")
+            # gplsat data loader (start) --------------------------------------
             try:
                 data = next(trainloader_iter)
             except StopIteration:
                 trainloader_iter = iter(trainloader)
                 data = next(trainloader_iter)
+            # gplsat data loadeir (end) ---------------------------------------
+            
+            view_id = data["image_id"][0].item()
 
-            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
-            Ks = data["K"].to(device)  # [1, 3, 3]
-            pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
-            num_train_rays_per_step = (
-                pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
-            )
-            image_ids = data["image_id"].to(device)
-            masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
-            exposure = (
-                data["exposure"].to(device) if "exposure" in data else None
-            )  # [B,]
+
+            # Cache raw image inputs or load if cache disabled
+            def _load_data():
+                return {
+                    "pixels": data["image"].to(device) / 255.0,
+                    "camtoworlds": data["camtoworld"].to(device),
+                    "Ks": data["K"].to(device),
+                    "image_ids": data["image_id"].to(device),
+                    "camera_idcs": data["camera_idx"].to(device),
+                    "masks": data.get("mask").to(device) if data.get("mask") is not None else None,
+                    "exposure": data.get("exposure").to(device) if "exposure" in data else None,
+                }
+            if cfg.enable_input_cache:
+                cached_data = self.cache_manager.get_cache(view_id, _load_data)
+            else:
+                cached_data = _load_data()
+            
+            # Fetch inputs from cache
+            # Same parameters as gsplat
+            pixels = cached_data["pixels"] # [ 1, H, W, 3 ]
+            camtoworlds = cached_data["camtoworlds"] # [ 1, 4, 4 ]
+            Ks = cached_data["Ks"] # [ 1, 3, 3 ]
+            image_ids = cached_data["image_ids"]
+            camera_idcs = cached_data["camera_idcs"]
+            masks = cached_data["masks"] # [ 1, H, W ]
+            exposure = cached_data["exposure"] # [ B, ]
+
+            # Loss not cached
             if cfg.depth_loss:
-                points = data["points"].to(device)  # [1, M, 2]
-                depths_gt = data["depths"].to(device)  # [1, M]
+                points = data["points"].to(device) # [
+                depths_gt = data["depths"].to(device)
 
             height, width = pixels.shape[1:3]
 
+
+            # gsplat perturb/adjust  ------------------------------------------
+            camtoworlds_gt = camtoworlds
             if cfg.pose_noise:
                 camtoworlds = self.pose_perturb(camtoworlds, image_ids)
-
             if cfg.pose_opt:
                 camtoworlds = self.pose_adjust(camtoworlds, image_ids)
 
-            # sh schedule
+            torch.cuda.current_stream().wait_stream(self.cache_manager.transfer_stream)
+            nvtx.range_pop()
+
+            # Forward Pass: always uses new inputs
+            nvtx.range_push("Forward_Rasterize")
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
 
-            # forward
+            WARMUP_STEPS = 4000
+            use_culling = cfg.enable_frustum_culling if step > WARMUP_STEPS else False
+
+            # Pre-rendering frustum culling (CLM paper §5.1): drop Gaussians
+            # that are outside the view frustum before rasterization
+            if use_culling:
+                cull_mask = self.frustum_cull(
+                    camtoworlds=camtoworlds,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    step=step,
+                    near_plane=cfg.near_plane,
+                )
+            else:
+                cull_mask = None
+
+            # We call this fresh so 'info' has active gradients for densification
             renders, alphas, info = self.rasterize_splats(
                 camtoworlds=camtoworlds,
                 Ks=Ks,
@@ -1040,10 +1026,12 @@ class Runner:
                 image_ids=image_ids,
                 render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                 masks=masks,
-                frame_idcs=image_ids,
-                camera_idcs=data["camera_idx"].to(device),
+                camera_idcs=camera_idcs,
                 exposure=exposure,
+                external_buffers=None, 
+                cull_mask=cull_mask,
             )
+            
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
             else:
@@ -1053,37 +1041,43 @@ class Runner:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
 
-            self.cfg.strategy.step_pre_backward(
-                params=self.splats,
-                optimizers=self.optimizers,
-                state=self.strategy_state,
-                step=step,
-                info=info,
-            )
+            nvtx.range_pop()
 
-            # loss
-            l1loss = F.l1_loss(colors, pixels)
-            ssimloss = 1.0 - fused_ssim(
-                colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
+            # Pre backward (basically just setup)
+            nvtx.range_push("Strategy_Pre_Backward")
+            self.cfg.strategy.step_pre_backward(
+                params=self.splats, optimizers=self.optimizers,
+                state=self.strategy_state, step=step, info=info,
             )
+            nvtx.range_pop()
+    
+            # Loss calculations and backward calculations
+            # Largely taken from gsplat impl + cache updates
+            nvtx.range_push("Loss_and_Backward")
+            l1loss = F.l1_loss(colors, pixels)
+            ssimloss = 1.0 - fused_ssim(colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2))
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
             if cfg.depth_loss:
                 # query depths from depth map
-                points = torch.stack(
+                points_ndc = torch.stack(
                     [
                         points[:, :, 0] / (width - 1) * 2 - 1,
                         points[:, :, 1] / (height - 1) * 2 - 1,
                     ],
                     dim=-1,
-                )  # normalize to [-1, 1]
-                grid = points.unsqueeze(2)  # [1, M, 1, 2]
-                depths = F.grid_sample(
+                ) # Normalized to [-1, -1]
+                grid = points_ndc.unsqueeze(2)  # [1, M, 1, 2]
+                depths_sampled = F.grid_sample(
                     depths.permute(0, 3, 1, 2), grid, align_corners=True
-                )  # [1, 1, M, 1]
-                depths = depths.squeeze(3).squeeze(1)  # [1, M]
-                # calculate loss in disparity space
-                disp = torch.where(depths > 0.0, 1.0 / depths, torch.zeros_like(depths))
-                disp_gt = 1.0 / depths_gt  # [1, M]
+                ) # [1, 1, M, 1]
+                # Calculate loss in disparity space
+                depths_sampled = depths_sampled.squeeze(3).squeeze(1)
+                disp = torch.where(
+                    depths_sampled > 0.0,
+                    1.0 / depths_sampled,
+                    torch.zeros_like(depths_sampled),
+                )
+                disp_gt = 1.0 / depths_gt
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
             if cfg.post_processing == "bilateral_grid":
@@ -1096,33 +1090,71 @@ class Runner:
                     self.post_processing_module.get_regularization_loss()
                 )
                 loss += post_processing_reg_loss
-
-            # regularizations
+            # Regularizations
             if cfg.opacity_reg > 0.0:
                 loss += cfg.opacity_reg * torch.sigmoid(self.splats["opacities"]).mean()
             if cfg.scale_reg > 0.0:
                 loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
 
-            loss.backward()
+            # Call backward
+            (loss / optimizer_stride).backward()
+            nvtx.range_pop()
 
-            desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
+            # Loss update 
+            desc = f"loss={loss.item():.3f}| sh degree={sh_degree_to_use}| "
             if cfg.depth_loss:
                 desc += f"depth loss={depthloss.item():.6f}| "
             if cfg.pose_opt and cfg.pose_noise:
-                # monitor the pose error if we inject noise
+                # monitor the pos error if we inject noise
                 pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
                 desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
+    
+             # Post backward
+            nvtx.range_push("Strategy_Post_Backward")
+         
+            # Denisfication strategy
+            base_thresh = 0.0002
 
-            # write images (gt and render)
-            # if world_rank == 0 and step % 800 == 0:
-            #     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
-            #     canvas = canvas.reshape(-1, *canvas.shape[2:])
-            #     imageio.imwrite(
-            #         f"{self.render_dir}/train_rank{self.world_rank}.png",
-            #         (canvas * 255).astype(np.uint8),
-            #     )
+            if hasattr(cfg.strategy, "densify_grad_thresh"):
+                if step < WARMUP_STEPS:
+                    cfg.strategy.densify_grad_thresh = base_thresh * 0.5
+                else:
+                    cfg.strategy.densify_grad_thresh = base_thresh
+            else:
+                pass
 
+            if optimizer_stride > 1:
+                for v in info.values():
+                    if isinstance(v, torch.Tensor) and v.grad is not None:
+                        v.grad.mul_(optimizer_stride)
+
+            cfg.strategy.step_post_backward(
+                params=self.splats,
+                optimizers=self.optimizers,
+                state=self.strategy_state,
+                step=step,
+                info=info,
+                packed=cfg.packed,
+            )
+
+            cfg.strategy.densify_grad_threshold = base_thresh 
+            nvtx.range_pop()
+
+            # Optimizer update with stride
+            if (step+1) % optimizer_stride == 0:
+                nvtx.range_push("Optimizer_Update")
+                for optimizer in self.optimizers.values():
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                for scheduler in schedulers:
+                    scheduler.step()
+                nvtx.range_pop()
+    
+            # End of per step ntvx logging
+            nvtx.range_pop()
+
+            # Gsplat writer --------------------------------------------------------- 
             if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 self.writer.add_scalar("train/loss", loss.item(), step)
@@ -1174,12 +1206,11 @@ class Runner:
                 torch.save(
                     data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
                 )
+
             if (
                 step in [i - 1 for i in cfg.ply_steps] or step == max_steps - 1
             ) and cfg.save_ply:
-
                 if self.cfg.app_opt:
-                    # eval at origin to bake the appeareance into the colors
                     rgb = self.app_module(
                         features=self.splats["features"],
                         embed_ids=None,
@@ -1193,7 +1224,6 @@ class Runner:
                 else:
                     sh0 = self.splats["sh0"]
                     shN = self.splats["shN"]
-
                 means = self.splats["means"]
                 scales = self.splats["scales"]
                 quats = self.splats["quats"]
@@ -1209,96 +1239,12 @@ class Runner:
                     save_to=f"{self.ply_dir}/point_cloud_{step}.ply",
                 )
 
-            # Turn Gradients into Sparse Tensor before running optimizer
-            if cfg.sparse_grad:
-                assert cfg.packed, "Sparse gradients only work with packed mode."
-                gaussian_ids = info["gaussian_ids"]
-                for k in self.splats.keys():
-                    grad = self.splats[k].grad
-                    if grad is None or grad.is_sparse:
-                        continue
-                    self.splats[k].grad = torch.sparse_coo_tensor(
-                        indices=gaussian_ids[None],  # [1, nnz]
-                        values=grad[gaussian_ids],  # [nnz, ...]
-                        size=self.splats[k].size(),  # [N, ...]
-                        is_coalesced=len(Ks) == 1,
-                    )
-
-            if cfg.visible_adam:
-                gaussian_cnt = self.splats.means.shape[0]
-                if cfg.packed:
-                    visibility_mask = torch.zeros_like(
-                        self.splats["opacities"], dtype=bool
-                    )
-                    visibility_mask.scatter_(0, info["gaussian_ids"], 1)
-                else:
-                    visibility_mask = (info["radii"] > 0).all(-1).any(0)
-
-            # optimize
-            for optimizer in self.optimizers.values():
-                if cfg.visible_adam:
-                    optimizer.step(visibility_mask)
-                else:
-                    optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.pose_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.app_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.post_processing_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for scheduler in schedulers:
-                scheduler.step()
-
-            # Run post-backward steps after backward and optimizer
-            if isinstance(self.cfg.strategy, DefaultStrategy):
-                self.cfg.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    packed=cfg.packed,
-                )
-            elif isinstance(self.cfg.strategy, MCMCStrategy):
-                self.cfg.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    lr=schedulers[0].get_last_lr()[0],
-                )
-            else:
-                assert_never(self.cfg.strategy)
-
-            # eval the full set
-            if step in [i - 1 for i in cfg.eval_steps]:
-                self.eval(step)
-                self.render_traj(step)
-
-            # run compression
-            if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
-                self.run_compression(step=step)
-
-            if not cfg.disable_viewer:
-                self.viewer.lock.release()
-                num_train_steps_per_sec = 1.0 / (max(time.time() - tic, 1e-10))
-                num_train_rays_per_sec = (
-                    num_train_rays_per_step * num_train_steps_per_sec
-                )
-                # Update the viewer state.
-                self.viewer.render_tab_state.num_train_rays_per_sec = (
-                    num_train_rays_per_sec
-                )
-                # Update the scene.
-                self.viewer.update(step, num_train_rays_per_step)
-    """
-
-    # comment
+            # Stop Profiler and break early (less profiling overhead)
+            if step == profile_stop:
+                profiler.stop()
+                print(f"Profiling complete. Captured steps {profile_start} to {profile_stop}.")
+                break
+    
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
         """Entry for evaluation."""
