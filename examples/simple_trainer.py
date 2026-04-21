@@ -862,11 +862,36 @@ class Runner:
             # Assuming fused_ssim is imported
             ssimloss = 1.0 - fused_ssim(colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2))
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
-            lose = loss/optimizer_stride
-            
-            loss.backward()
+            (loss / optimizer_stride).backward()
             nvtx.range_pop()
-    
+
+            # --- STRATEGY POST-BACKWARD (Densification/MCMC) ---
+            nvtx.range_push("Strategy_Post_Backward")
+
+            strategy = cfg.strategy
+            is_refinement_step = (
+                step >= strategy.refine_start_iter and
+                step <= strategy.refine_stop_iter and
+                step % strategy.refine_every == 0
+            )
+
+            if is_refinement_step:
+                current_count = self.splats['means'].shape[0]
+
+                if current_count < 4_500_000:
+                    self.cache_manager.purge_all()
+
+                    strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        packed=cfg.packed
+                    )
+
+            nvtx.range_pop()
+
             # --- OPTIMIZER STEP ---
             if (step+1) % optimizer_stride == 0:
                 nvtx.range_push("Optimizer_Update")
@@ -876,34 +901,6 @@ class Runner:
                 for scheduler in schedulers:
                     scheduler.step()
                 nvtx.range_pop()
-                
-
-            # --- STRATEGY POST-BACKWARD (Densification/MCMC) ---
-            nvtx.range_push("Strategy_Post_Backward")
-        
-            strategy = cfg.strategy
-            is_refinement_step = (
-                step >= strategy.refine_start_iter and 
-                step <= strategy.refine_stop_iter and 
-                step % strategy.refine_every == 0
-            )
-            
-            if is_refinement_step:
-                current_count = self.splats['means'].shape[0]
-                
-                if current_count < 4_500_000:
-                    self.cache_manager.purge_all()
-                    
-                    strategy.step_post_backward(
-                        params=self.splats, 
-                        optimizers=self.optimizers,
-                        state=self.strategy_state, 
-                        step=step, 
-                        info=info, 
-                        packed=cfg.packed
-                    )
-
-            nvtx.range_pop()
     
             # END NVTX ITERATION BLOCK
             nvtx.range_pop() 

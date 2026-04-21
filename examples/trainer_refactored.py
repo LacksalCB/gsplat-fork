@@ -68,29 +68,28 @@ class GSCacheManager:
         )
 
     def get_cache(self, view_id, compute_func):
-        # Hit: Update LRU
         if view_id in self.cache:
             self.cache.move_to_end(view_id)
-            entry = self.cache[view_id]
-            with torch.cuda.stream(self.transfer_stream):
-                for k, v in entry.items():
-                    if isinstance(v, torch.Tensor):
-                        entry[k] = v.to("cuda", non_blocking=True)
-            return entry
-
-        # Miss: compute new entry
+            return self.cache[view_id]
         new_entry = compute_func()
-        entry_bytes = self._entry_bytes(new_entry)
+        self._store(view_id, new_entry)
+        return new_entry
 
-        # Eviction Policy
+    def prefetch(self, view_id, compute_func):
+        if view_id in self.cache:
+            return
+        with torch.cuda.stream(self.transfer_stream):
+            new_entry = compute_func()
+        self._store(view_id, new_entry)
+
+    def _store(self, view_id, entry):
+        entry_bytes = self._entry_bytes(entry)
         while self.current_bytes + entry_bytes > self.limit_bytes and self.cache:
             lru_id, _ = self.cache.popitem(last=False)
             self.current_bytes -= self.entry_sizes.pop(lru_id)
-
-        self.cache[view_id] = new_entry
+        self.cache[view_id] = entry
         self.entry_sizes[view_id] = entry_bytes
         self.current_bytes += entry_bytes
-        return new_entry
 
     def purge_all(self):
         self.cache.clear()
@@ -194,6 +193,10 @@ class Config:
     enable_frustum_culling: bool = False
     # Enable LRU input cache to skip repeated CPU->GPU transfers
     enable_input_cache: bool = False
+    # Async pre-fetch next step's data onto GPU during current step's compute
+    enable_prefetch: bool = False
+    # VRAM threshold (GB) for the LRU input cache eviction policy
+    vram_thresh_gb: float = 18.5
 
     # LR for 3D point positions
     means_lr: float = 1.6e-4
@@ -847,7 +850,7 @@ class Runner:
     
         # Setup Cache
         if not hasattr(self, 'cache_manager'):
-            self.cache_manager = GSCacheManager(vram_thresh_gb=18.5)
+            self.cache_manager = GSCacheManager(vram_thresh_gb=cfg.vram_thresh_gb)
 
         # 1. Dump Config (From Gsplat) ------------------------------------
         if world_rank == 0:
@@ -908,10 +911,10 @@ class Runner:
         trainloader_iter = iter(trainloader)
         # End Data Loader (from gsplat) ---------------------------------------
 
-        # 3. Profiling Setup with nsys 
+        # 3. Profiling Setup with nsys
         profile_start, profile_stop = 0, max_steps + 1
 
-         # Set optimizer stride from cfg 
+         # Set optimizer stride from cfg
         # Sets how many steps optimizer acummulates gradients before updating learned parameters
         # Higher stride somewhat reduces runtime, but has PSNR cost
         optimizer_stride = cfg.optimizer_stride
@@ -919,6 +922,10 @@ class Runner:
         # Training Loop
         global_tic = time.time()
         pbar = tqdm.tqdm(range(init_step, max_steps))
+
+        # Prime first batch for peek-ahead prefetch pattern
+        next_data = next(trainloader_iter)
+
         for step in pbar:
             # Start nsys profiler
             if step == profile_start:
@@ -935,30 +942,30 @@ class Runner:
 
             # NTVX step counter
             nvtx.range_push(f"Iteration_{step}")
-    
+
             # NTVX Range 1: Data Loading
             nvtx.range_push("Data_Loading")
-            # gplsat data loader (start) --------------------------------------
+            # Peek-ahead: consume pre-fetched batch, advance iterator for next step
+            data = next_data
             try:
-                data = next(trainloader_iter)
+                next_data = next(trainloader_iter)
             except StopIteration:
                 trainloader_iter = iter(trainloader)
-                data = next(trainloader_iter)
-            # gplsat data loadeir (end) ---------------------------------------
-            
+                next_data = next(trainloader_iter)
+
             view_id = data["image_id"][0].item()
 
 
             # Cache raw image inputs or load if cache disabled
             def _load_data():
                 return {
-                    "pixels": data["image"].to(device) / 255.0,
-                    "camtoworlds": data["camtoworld"].to(device),
-                    "Ks": data["K"].to(device),
-                    "image_ids": data["image_id"].to(device),
-                    "camera_idcs": data["camera_idx"].to(device),
-                    "masks": data.get("mask").to(device) if data.get("mask") is not None else None,
-                    "exposure": data.get("exposure").to(device) if "exposure" in data else None,
+                    "pixels": data["image"].to(device, non_blocking=True).float() / 255.0,
+                    "camtoworlds": data["camtoworld"].to(device, non_blocking=True),
+                    "Ks": data["K"].to(device, non_blocking=True),
+                    "image_ids": data["image_id"].to(device, non_blocking=True),
+                    "camera_idcs": data["camera_idx"].to(device, non_blocking=True),
+                    "masks": data["mask"].to(device, non_blocking=True) if data.get("mask") is not None else None,
+                    "exposure": data["exposure"].to(device, non_blocking=True) if "exposure" in data else None,
                 }
             if cfg.enable_input_cache:
                 cached_data = self.cache_manager.get_cache(view_id, _load_data)
@@ -991,6 +998,22 @@ class Runner:
                 camtoworlds = self.pose_adjust(camtoworlds, image_ids)
 
             torch.cuda.current_stream().wait_stream(self.cache_manager.transfer_stream)
+
+            # Kick off async prefetch for next step (runs during forward+backward+optimizer)
+            if cfg.enable_input_cache and cfg.enable_prefetch:
+                _nd = next_data
+                def _prefetch_load():
+                    return {
+                        "pixels": _nd["image"].to(device, non_blocking=True).float() / 255.0,
+                        "camtoworlds": _nd["camtoworld"].to(device, non_blocking=True),
+                        "Ks": _nd["K"].to(device, non_blocking=True),
+                        "image_ids": _nd["image_id"].to(device, non_blocking=True),
+                        "camera_idcs": _nd["camera_idx"].to(device, non_blocking=True),
+                        "masks": _nd["mask"].to(device, non_blocking=True) if _nd.get("mask") is not None else None,
+                        "exposure": _nd["exposure"].to(device, non_blocking=True) if "exposure" in _nd else None,
+                    }
+                self.cache_manager.prefetch(next_data["image_id"][0].item(), _prefetch_load)
+
             nvtx.range_pop()
 
             # Forward Pass: always uses new inputs
@@ -1138,7 +1161,13 @@ class Runner:
                 packed=cfg.packed,
             )
 
-            cfg.strategy.densify_grad_threshold = base_thresh 
+            # Zero info grads so densification sees per-step signals, not accumulated
+            if optimizer_stride > 1:
+                for v in info.values():
+                    if isinstance(v, torch.Tensor) and v.grad is not None:
+                        v.grad.zero_()
+
+            cfg.strategy.densify_grad_threshold = base_thresh
             nvtx.range_pop()
 
             # Optimizer update with stride
