@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 """
-nsys_mem_table.py
------------------
-Queries memory operation stats (Memset, HtoD, DtoH, DtoD) directly from
-.sqlite files exported by nsys.
+nsys_kernel_table.py
+--------------------
+Queries memory operation stats (Memset, HtoD, DtoH, DtoD) and GPU utilization
+directly from .sqlite files exported by nsys.
 
   - CUPTI_ACTIVITY_KIND_MEMCPY  (copyKind: 1=HtoD, 2=DtoH, 8=DtoD)
   - CUPTI_ACTIVITY_KIND_MEMSET  (has direct 'bytes' column)
+  - CUPTI_ACTIVITY_KIND_KERNEL  (used for GPU utilization %)
 
-Reports Total Time (ns), Instances, and Bandwidth (GB/s) per operation.
+Reports Total Time (ns), Instances, and Bandwidth (GB/s) per operation,
+plus GPU Utilization (%).
 
 USAGE:
   Step 1 — Export all .nsys-rep files to .sqlite (do this once):
-      for f in *.nsys-rep; do
-          nsys export --type sqlite --force-overwrite true "$f" &
-      done
-      wait
+      ./nsys_export_sqlite.sh <results_dir>
 
   Step 2 — Run this script:
-      python3 nsys_mem_table.py
+      python3 nsys_kernel_table.py <results_dir> [--output output.csv]
+
+  Examples:
+      python3 nsys_kernel_table.py outputs/2026-03-25_23-49-37_ablations_p2/results
+      python3 nsys_kernel_table.py outputs/2026-03-25_23-49-37_ablations_p2/results --output my_table.csv
 """
 
+import argparse
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,15 +32,7 @@ from pathlib import Path
 
 import pandas as pd
 
-# =============================================================================
-# PARAMETERS — edit these
-# =============================================================================
-
-NSYS_DIR   = Path("/scratch/rhm4nj/gpu_arch/gsplat-fork/scripts/slurm/outputs/2026-03-25_23-16-52_ablations/results")
-OUTPUT_CSV = NSYS_DIR / "nsys_mem_table.csv"
 MAX_WORKERS = 8
-
-# =============================================================================
 
 COPY_KINDS = {1: "HtoD", 2: "DtoH", 8: "DtoD"}
 
@@ -164,7 +160,7 @@ def build_table(nsys_dir: Path) -> pd.DataFrame:
     if not sqlite_files:
         print(f"No .sqlite files found in {nsys_dir}", file=sys.stderr)
         print("Export first:", file=sys.stderr)
-        print("  for f in *.nsys-rep; do nsys export --type sqlite --force-overwrite true \"$f\" & done && wait", file=sys.stderr)
+        print("  ./nsys_export_sqlite.sh <results_dir>", file=sys.stderr)
         sys.exit(1)
 
     col_tuples = [(op, m) for op in OPS for m in METRICS] + \
@@ -185,7 +181,18 @@ def build_table(nsys_dir: Path) -> pd.DataFrame:
 
 
 def main():
-    df = build_table(NSYS_DIR)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("results_dir", type=Path,
+                        help="Directory containing .sqlite files")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Output CSV path (default: <results_dir>/nsys_mem_table.csv)")
+    args = parser.parse_args()
+
+    nsys_dir   = args.results_dir
+    output_csv = args.output if args.output is not None else nsys_dir / "nsys_mem_table.csv"
+
+    df = build_table(nsys_dir)
 
     print("\n" + "=" * 120)
     pd.set_option("display.max_columns", None)
@@ -194,11 +201,10 @@ def main():
     print(df.to_string())
     print("=" * 120 + "\n")
 
-    if OUTPUT_CSV is not None:
-        df_flat = df.copy()
-        df_flat.columns = [f"{op} | {m}" for op, m in df_flat.columns]
-        df_flat.to_csv(OUTPUT_CSV)
-        print(f"Wrote table to: {OUTPUT_CSV}")
+    df_flat = df.copy()
+    df_flat.columns = [f"{op} | {m}" for op, m in df_flat.columns]
+    df_flat.to_csv(output_csv)
+    print(f"Wrote table to: {output_csv}")
 
 
 if __name__ == "__main__":

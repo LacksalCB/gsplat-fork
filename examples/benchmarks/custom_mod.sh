@@ -4,10 +4,14 @@ SCENE_LIST=($1)
 RESULT_DIR=$2
 if [ -z "$3" ]; then
 	DEVICE=2
-else 
+else
 	DEVICE=$3
 fi
 EXTRA_ARGS="${@:4}"   # all args after $1, $2, and $3 passed through to trainer.py
+                      # optional flags: --vram-thresh-gb <value>
+                      #                 --enable-prefetch / --no-enable-prefetch
+                      #                 --enable-input-cache / --no-enable-input-cache
+                      #                 --enable-frustum-culling / --no-enable-frustum-culling
 RENDER_TRAJ_PATH="ellipse"
 
 for SCENE in $SCENE_LIST;

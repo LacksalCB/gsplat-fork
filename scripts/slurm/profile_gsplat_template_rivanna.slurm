@@ -49,3 +49,7 @@ time nsys profile \
     {profile_output} \
     {gpu_num} \
     {args}
+
+echo "Exporting SQLite for {profile_output}..."
+nsys export --type sqlite --force-overwrite true --output {profile_output}.sqlite {profile_output}.nsys-rep
+echo "SQLite export done."
