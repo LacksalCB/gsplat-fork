@@ -195,6 +195,17 @@ class Config:
     optimizer_stride: int = 4
     # Enable pre-rasterization frustum culling
     enable_frustum_culling: bool = False
+    # Pixel-space projected radius multiplier used by frustum culling.
+    # Lower values cull more aggressively.
+    frustum_cull_radius_scale: float = 1.5
+    # Frustum boundary margin as a fraction of max(width, height) before switch step.
+    # Lower values cull more aggressively.
+    frustum_cull_margin_early: float = 0.5
+    # Frustum boundary margin as a fraction of max(width, height) after switch step.
+    # Lower values cull more aggressively.
+    frustum_cull_margin_late: float = 0.1
+    # Step at which frustum culling margin switches from early to late value.
+    frustum_cull_margin_switch_step: int = 10_000
     # Enable LRU input cache to skip repeated CPU->GPU transfers
     enable_input_cache: bool = False
     # Async pre-fetch next step's data onto GPU during current step's compute
@@ -671,10 +682,16 @@ class Runner:
         # Conservative pixel radius from the largest Gaussian axis
         f_max = torch.max(fx, fy)  # [C, 1]
 
-        r =  1.5 * f_max * max_scale.unsqueeze(0) / z_safe  # [C, N]
+        radius_scale = max(self.cfg.frustum_cull_radius_scale, 0.0)
+        r = radius_scale * f_max * max_scale.unsqueeze(0) / z_safe  # [C, N]
 
         # Epsilon smoothing 
-        e = 0.5 * max(width, height) if step < 10000 else 0.1 * max(width, height)
+        if step < self.cfg.frustum_cull_margin_switch_step:
+            margin_scale = self.cfg.frustum_cull_margin_early
+        else:
+            margin_scale = self.cfg.frustum_cull_margin_late
+        margin_scale = max(margin_scale, 0.0)
+        e = margin_scale * max(width, height)
         in_frustum = (
             valid_depth
             & (u + r > -e) 

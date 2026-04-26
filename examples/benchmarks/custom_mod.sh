@@ -7,11 +7,8 @@ if [ -z "$3" ]; then
 else
 	DEVICE=$3
 fi
-EXTRA_ARGS="${@:4}"   # all args after $1, $2, and $3 passed through to trainer.py
-                      # optional flags: --vram-thresh-gb <value>
-                      #                 --enable-prefetch / --no-enable-prefetch
-                      #                 --enable-input-cache / --no-enable-input-cache
-                      #                 --enable-frustum-culling / --no-enable-frustum-culling
+EXTRA_ARGS="${@:4}"   # all args after $1, $2, and $3 passed through to trainer file
+
 RENDER_TRAJ_PATH="ellipse"
 
 for SCENE in $SCENE_LIST;
@@ -36,7 +33,7 @@ do
     echo "Running eval and render for $SCENE"
     for CKPT in $RESULT_DIR/$SCENE/ckpts/*;
     do
-        time CUDA_VISIBLE_DEVICES=$DEVICE python -u trainer.py default --disable_viewer --data_factor $DATA_FACTOR \
+        time CUDA_VISIBLE_DEVICES=$DEVICE python -u trainer_refactored.py default --disable_viewer --data_factor $DATA_FACTOR \
             --render_traj_path $RENDER_TRAJ_PATH \
             --data_dir data/360_v2/$SCENE/ \
             --result_dir $RESULT_DIR/$SCENE/ \

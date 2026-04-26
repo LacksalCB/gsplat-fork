@@ -237,14 +237,23 @@ class DefaultStrategy(Strategy):
             state["radii"] = torch.zeros(n_gaussian, device=grads.device)
 
         # update the running state
+        global_ids = info.get("global_gaussian_ids", None)
         if packed:
             # grads is [nnz, 2]
             gs_ids = info["gaussian_ids"]  # [nnz]
+            if global_ids is not None:
+                gs_ids = global_ids[gs_ids]
             radii = info["radii"].max(dim=-1).values  # [nnz]
         else:
             # grads is [C, N, 2]
             sel = (info["radii"] > 0.0).all(dim=-1)  # [C, N]
-            gs_ids = torch.where(sel)[1]  # [nnz]
+            local_ids = torch.where(sel)[1]  # [nnz]
+            if global_ids is not None:
+                # Optional local->global mapping for render-time Gaussian subsets
+                # (e.g. frustum culling before rasterization).
+                gs_ids = global_ids[local_ids]
+            else:
+                gs_ids = local_ids
             grads = grads[sel]  # [nnz, 2]
             radii = info["radii"][sel].max(dim=-1).values  # [nnz]
         state["grad2d"].index_add_(0, gs_ids, grads.norm(dim=-1))

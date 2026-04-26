@@ -6,10 +6,10 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256"
 
 import time
-from collections import defaultdict, OrderedDict
+from collections import defaultdict, OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import imageio
 import numpy as np
@@ -48,54 +48,214 @@ import torch.cuda.profiler as profiler
 import torch.cuda.nvtx as nvtx
 
 
-# Raw image software cacher with LRU eviction 
-# Impractical to use scratchpad due to data size and access pattern,
-# So it's a simple VRAM glob-mem OrderedDict()
-class GSCacheManager:
-    # Adjust threshold to limit how much VRAM cache can take up
-    def __init__(self, vram_thresh_gb=18.5):
-        self.limit_bytes = int(vram_thresh_gb * (1024 ** 3)) #input GB to bytes conversion
-        self.cache = OrderedDict()
-        self.entry_sizes = {}   
+class BaseGPUCacheManager:
+    # Adjust threshold to limit how much VRAM cache can take up.
+    def __init__(self, vram_thresh_gb: float = 18.5):
+        self.limit_bytes = int(vram_thresh_gb * (1024 ** 3))
+        self.cache: Dict[int, Dict[str, Optional[torch.Tensor]]] = {}
+        self.entry_sizes: Dict[int, int] = {}
         self.current_bytes = 0
         self.transfer_stream = torch.cuda.Stream()
- 
-    def _entry_bytes(self, entry):
+
+    def _entry_bytes(self, entry: Dict[str, Optional[torch.Tensor]]) -> int:
         return sum(
             v.element_size() * v.numel()
             for v in entry.values()
             if isinstance(v, torch.Tensor)
         )
 
-    def get_cache(self, view_id, compute_func):
+    def _on_hit(self, view_id: int):
+        return None
+
+    def _on_insert(self, view_id: int):
+        return None
+
+    def _on_remove(self, view_id: int, entry_size: int):
+        return None
+
+    def _select_evict_id(self) -> int:
+        raise NotImplementedError
+
+    def _reset_policy_state(self):
+        return None
+
+    def _remove(self, view_id: int):
+        if view_id not in self.cache:
+            return
+        entry_size = self.entry_sizes.pop(view_id)
+        self.current_bytes -= entry_size
+        self.cache.pop(view_id)
+        self._on_remove(view_id, entry_size)
+
+    def _store(self, view_id: int, entry: Dict[str, Optional[torch.Tensor]]):
+        entry_bytes = self._entry_bytes(entry)
+        if entry_bytes > self.limit_bytes:
+            return
         if view_id in self.cache:
-            self.cache.move_to_end(view_id)
+            self._remove(view_id)
+        while self.current_bytes + entry_bytes > self.limit_bytes and self.cache:
+            self._remove(self._select_evict_id())
+        if self.current_bytes + entry_bytes > self.limit_bytes:
+            return
+        self.cache[view_id] = entry
+        self.entry_sizes[view_id] = entry_bytes
+        self.current_bytes += entry_bytes
+        self._on_insert(view_id)
+
+    def get_cache(
+        self, view_id: int, compute_func: Callable[[], Dict[str, Optional[torch.Tensor]]]
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        if view_id in self.cache:
+            self._on_hit(view_id)
             return self.cache[view_id]
         new_entry = compute_func()
         self._store(view_id, new_entry)
         return new_entry
 
-    def prefetch(self, view_id, compute_func):
+    def prefetch(
+        self, view_id: int, compute_func: Callable[[], Dict[str, Optional[torch.Tensor]]]
+    ):
         if view_id in self.cache:
             return
         with torch.cuda.stream(self.transfer_stream):
             new_entry = compute_func()
         self._store(view_id, new_entry)
 
-    def _store(self, view_id, entry):
-        entry_bytes = self._entry_bytes(entry)
-        while self.current_bytes + entry_bytes > self.limit_bytes and self.cache:
-            lru_id, _ = self.cache.popitem(last=False)
-            self.current_bytes -= self.entry_sizes.pop(lru_id)
-        self.cache[view_id] = entry
-        self.entry_sizes[view_id] = entry_bytes
-        self.current_bytes += entry_bytes
-
     def purge_all(self):
         self.cache.clear()
         self.entry_sizes.clear()
         self.current_bytes = 0
+        self._reset_policy_state()
         torch.cuda.empty_cache()
+
+
+class GPULRUCacheManager(BaseGPUCacheManager):
+    def __init__(self, vram_thresh_gb: float = 18.5):
+        super().__init__(vram_thresh_gb=vram_thresh_gb)
+        self.lru = OrderedDict()
+
+    def _on_hit(self, view_id: int):
+        self.lru.move_to_end(view_id)
+
+    def _on_insert(self, view_id: int):
+        self.lru[view_id] = None
+
+    def _on_remove(self, view_id: int, entry_size: int):
+        self.lru.pop(view_id, None)
+
+    def _select_evict_id(self) -> int:
+        return next(iter(self.lru))
+
+    def _reset_policy_state(self):
+        self.lru.clear()
+
+
+class GPULFUCacheManager(BaseGPUCacheManager):
+    def __init__(self, vram_thresh_gb: float = 18.5):
+        super().__init__(vram_thresh_gb=vram_thresh_gb)
+        self.freq: Dict[int, int] = {}
+        self.last_touch: Dict[int, int] = {}
+        self.touch_tick = 0
+
+    def _mark_touched(self, view_id: int, bump_freq: bool):
+        self.touch_tick += 1
+        self.last_touch[view_id] = self.touch_tick
+        if bump_freq:
+            self.freq[view_id] = self.freq.get(view_id, 0) + 1
+
+    def _on_hit(self, view_id: int):
+        self._mark_touched(view_id, bump_freq=True)
+
+    def _on_insert(self, view_id: int):
+        self.freq[view_id] = 1
+        self._mark_touched(view_id, bump_freq=False)
+
+    def _on_remove(self, view_id: int, entry_size: int):
+        self.freq.pop(view_id, None)
+        self.last_touch.pop(view_id, None)
+
+    def _select_evict_id(self) -> int:
+        return min(
+            self.cache.keys(),
+            key=lambda vid: (self.freq.get(vid, 0), self.last_touch.get(vid, 0)),
+        )
+
+    def _reset_policy_state(self):
+        self.freq.clear()
+        self.last_touch.clear()
+        self.touch_tick = 0
+
+
+class GPUTwoQCacheManager(BaseGPUCacheManager):
+    # 2Q uses A1 (recent FIFO) + Am (frequent LRU).
+    def __init__(self, vram_thresh_gb: float = 18.5, a1_fraction: float = 0.25):
+        super().__init__(vram_thresh_gb=vram_thresh_gb)
+        self.a1_fraction = max(0.05, min(0.9, a1_fraction))
+        self.a1_queue = OrderedDict()
+        self.am_lru = OrderedDict()
+        self.tier: Dict[int, str] = {}
+        self.a1_bytes = 0
+        self.am_bytes = 0
+
+    def _on_hit(self, view_id: int):
+        tier = self.tier.get(view_id)
+        if tier == "a1":
+            self.a1_queue.pop(view_id, None)
+            self.am_lru[view_id] = None
+            self.tier[view_id] = "am"
+            size = self.entry_sizes.get(view_id, 0)
+            self.a1_bytes -= size
+            self.am_bytes += size
+        elif tier == "am":
+            self.am_lru.move_to_end(view_id)
+
+    def _on_insert(self, view_id: int):
+        self.a1_queue[view_id] = None
+        self.tier[view_id] = "a1"
+        self.a1_bytes += self.entry_sizes.get(view_id, 0)
+
+    def _on_remove(self, view_id: int, entry_size: int):
+        tier = self.tier.pop(view_id, None)
+        if tier == "a1":
+            self.a1_queue.pop(view_id, None)
+            self.a1_bytes -= entry_size
+        elif tier == "am":
+            self.am_lru.pop(view_id, None)
+            self.am_bytes -= entry_size
+
+    def _select_evict_id(self) -> int:
+        a1_budget = int(self.limit_bytes * self.a1_fraction)
+        if self.a1_queue and (self.a1_bytes > a1_budget or not self.am_lru):
+            return next(iter(self.a1_queue))
+        if self.am_lru:
+            return next(iter(self.am_lru))
+        return next(iter(self.a1_queue))
+
+    def _reset_policy_state(self):
+        self.a1_queue.clear()
+        self.am_lru.clear()
+        self.tier.clear()
+        self.a1_bytes = 0
+        self.am_bytes = 0
+
+
+# Backward-compatible alias for prior LRU implementation name.
+class GSCacheManager(GPULRUCacheManager):
+    pass
+
+
+def create_gpu_cache_manager(
+    cache_mode: str, vram_thresh_gb: float, twoq_a1_ratio: float
+) -> BaseGPUCacheManager:
+    if cache_mode in ("lru", "warm_all"):
+        return GPULRUCacheManager(vram_thresh_gb=vram_thresh_gb)
+    if cache_mode == "lfu":
+        return GPULFUCacheManager(vram_thresh_gb=vram_thresh_gb)
+    if cache_mode == "twoq":
+        return GPUTwoQCacheManager(
+            vram_thresh_gb=vram_thresh_gb, a1_fraction=twoq_a1_ratio
+        )
+    raise ValueError(f"Unsupported cache mode: {cache_mode}")
 
 @dataclass
 class Config:
@@ -191,11 +351,37 @@ class Config:
     optimizer_stride: int = 4
     # Enable pre-rasterization frustum culling
     enable_frustum_culling: bool = False
-    # Enable LRU input cache to skip repeated CPU->GPU transfers
+    # Pixel-space projected radius multiplier used by frustum culling.
+    # Lower values cull more aggressively.
+    frustum_cull_radius_scale: float = 1.5
+    # Frustum boundary margin as a fraction of max(width, height) before switch step.
+    # 0.0 means tight bounds (cull anything whose bounding circle is fully off-screen).
+    frustum_cull_margin_early: float = 0.0
+    # Frustum boundary margin as a fraction of max(width, height) after switch step.
+    frustum_cull_margin_late: float = 0.0
+    # Step at which frustum culling margin switches from early to late value.
+    frustum_cull_margin_switch_step: int = 10_000
+    # Recompute the frustum mask only every this many steps.
+    # The mask is also invalidated after densification (Gaussian count changes).
+    # Higher values reduce the ~5ms/step mask-computation overhead at the cost
+    # of a slightly stale mask between recomputations.
+    frustum_cull_interval: int = 10
+    # GPU input cache strategy.
+    # none: disable GPU cache
+    # lru: LRU eviction (current baseline behavior)
+    # lfu: least-frequently-used eviction
+    # twoq: 2Q policy with recent+frequent queues
+    # warm_all: pre-cache all train views at startup (subject to VRAM threshold)
+    cache_mode: Literal["none", "lru", "lfu", "twoq", "warm_all"] = "none"
+    # Legacy compatibility flag: if True and cache_mode=none, use lru.
     enable_input_cache: bool = False
-    # Async pre-fetch next step's data onto GPU during current step's compute
+    # Async prefetch upcoming batches onto GPU during current-step compute.
     enable_prefetch: bool = False
-    # VRAM threshold (GB) for the LRU input cache eviction policy
+    # Number of future batches to prefetch when enable_prefetch=True.
+    prefetch_lookahead: int = 1
+    # Fraction of cache budget reserved for A1 (recent queue) in 2Q mode.
+    twoq_a1_ratio: float = 0.25
+    # VRAM threshold (GB) for GPU input cache eviction policy.
     vram_thresh_gb: float = 18.5
 
     # LR for 3D point positions
@@ -668,10 +854,16 @@ class Runner:
         # Conservative pixel radius from the largest Gaussian axis
         f_max = torch.max(fx, fy)  # [C, 1]
 
-        r =  1.5 * f_max * max_scale.unsqueeze(0) / z_safe  # [C, N]
+        radius_scale = max(self.cfg.frustum_cull_radius_scale, 0.0)
+        r = radius_scale * f_max * max_scale.unsqueeze(0) / z_safe  # [C, N]
 
         # Epsilon smoothing to handle Gaussians near Frustum edge 
-        e = 0.5 * max(width, height) if step < 10000 else 0.1 * max(width, height)
+        if step < self.cfg.frustum_cull_margin_switch_step:
+            margin_scale = self.cfg.frustum_cull_margin_early
+        else:
+            margin_scale = self.cfg.frustum_cull_margin_late
+        margin_scale = max(margin_scale, 0.0)
+        e = margin_scale * max(width, height)
         in_frustum = (
             valid_depth
             & (u + r > -e) 
@@ -706,13 +898,17 @@ class Runner:
         quats = self.splats["quats"]  # [N, 4]
         scales = torch.exp(self.splats["scales"])  # [N, 3]
         opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
-        image_ids = kwargs.pop("image_ids", None) 
+        image_ids = kwargs.pop("image_ids", None)
         if cull_mask is not None:
-            means = means[cull_mask]
-            quats = quats[cull_mask]
-            scales = scales[cull_mask]
-            opacities = opacities[cull_mask]
-    
+            # Zero out culled Gaussians via opacity rather than slicing parameters.
+            # Slicing nn.Parameters (e.g. shN[cull_mask]) bakes a gather into the
+            # autograd graph and forces an expensive scatter in backward
+            # (indexing_backward_kernel) that costs ~16x more than the rasterizer
+            # savings.  Multiplying by cull_mask uses a cheap vectorized elementwise
+            # kernel in both directions and lets the rasterizer's own radii=0 path
+            # skip culled Gaussians during tile intersection and SH evaluation.
+            opacities = opacities * cull_mask
+
         # Check if image in cache before raster (from update)
         image_ids = kwargs.pop("image_ids", None)
         if external_buffers is not None:
@@ -725,20 +921,16 @@ class Runner:
 
 
         if self.cfg.app_opt:
-            features = self.splats["features"] if cull_mask is None else self.splats["features"][cull_mask]
-            splat_colors = self.splats["colors"] if cull_mask is None else self.splats["colors"][cull_mask]
             colors = self.app_module(
-                features=features,
+                features=self.splats["features"],
                 embed_ids=image_ids,
                 dirs=means[None, :, :] - camtoworlds[:, None, :3, 3],
                 sh_degree=kwargs.pop("sh_degree", self.cfg.sh_degree),
             )
-            colors = colors + splat_colors
+            colors = colors + self.splats["colors"]
             colors = torch.sigmoid(colors)
         else:
-            sh0 = self.splats["sh0"] if cull_mask is None else self.splats["sh0"][cull_mask]
-            shN = self.splats["shN"] if cull_mask is None else self.splats["shN"][cull_mask]
-            colors = torch.cat([sh0, shN], 1)  # [N, K, 3]
+            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
 
         if rasterize_mode is None:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
@@ -847,10 +1039,24 @@ class Runner:
         device = self.device
         world_rank = self.world_rank
         world_size = self.world_size
-    
-        # Setup Cache
-        if not hasattr(self, 'cache_manager'):
-            self.cache_manager = GSCacheManager(vram_thresh_gb=cfg.vram_thresh_gb)
+
+        # Setup cache behavior.
+        cache_mode = cfg.cache_mode
+        if cache_mode == "none" and cfg.enable_input_cache:
+            cache_mode = "lru"
+        cache_enabled = cache_mode != "none"
+        prefetch_lookahead = max(int(cfg.prefetch_lookahead), 0)
+        prefetch_enabled = (
+            cache_enabled and cfg.enable_prefetch and prefetch_lookahead > 0
+        )
+        cache_manager: Optional[BaseGPUCacheManager] = None
+        if cache_enabled:
+            cache_manager = create_gpu_cache_manager(
+                cache_mode=cache_mode,
+                vram_thresh_gb=cfg.vram_thresh_gb,
+                twoq_a1_ratio=cfg.twoq_a1_ratio,
+            )
+            self.cache_manager = cache_manager
 
         # 1. Dump Config (From Gsplat) ------------------------------------
         if world_rank == 0:
@@ -922,9 +1128,70 @@ class Runner:
         # Training Loop
         global_tic = time.time()
         pbar = tqdm.tqdm(range(init_step, max_steps))
+        _cached_cull_mask: Optional[Tensor] = None  # reused across frustum_cull_interval steps
+        _cull_mask_step: int = -9999
+        _last_loss: float = 0.0          # cached scalar to avoid per-step GPU sync
+        _prefetch_events: dict = {}      # view_id → CUDA event for granular stream sync
 
-        # Prime first batch for peek-ahead prefetch pattern
-        next_data = next(trainloader_iter)
+        def _next_train_batch():
+            nonlocal trainloader_iter
+            try:
+                return next(trainloader_iter)
+            except StopIteration:
+                trainloader_iter = iter(trainloader)
+                return next(trainloader_iter)
+
+        def _to_device_batch(batch):
+            return {
+                "pixels": batch["image"].to(device, non_blocking=True).float() / 255.0,
+                "camtoworlds": batch["camtoworld"].to(device, non_blocking=True),
+                "Ks": batch["K"].to(device, non_blocking=True),
+                "image_ids": batch["image_id"].to(device, non_blocking=True),
+                "camera_idcs": batch["camera_idx"].to(device, non_blocking=True),
+                "masks": (
+                    batch["mask"].to(device, non_blocking=True)
+                    if batch.get("mask") is not None
+                    else None
+                ),
+                "exposure": (
+                    batch["exposure"].to(device, non_blocking=True)
+                    if "exposure" in batch
+                    else None
+                ),
+            }
+
+        # Queue holds current batch + N lookahead batches for prefetching.
+        queue_target = 1 + (prefetch_lookahead if prefetch_enabled else 0)
+        data_queue = deque()
+
+        def _fill_data_queue():
+            while len(data_queue) < queue_target:
+                data_queue.append(_next_train_batch())
+
+        # Warm-all mode preloads all train views once before training starts.
+        if cache_mode == "warm_all" and cache_manager is not None:
+            warm_loader = torch.utils.data.DataLoader(
+                self.trainset,
+                batch_size=cfg.batch_size,
+                shuffle=False,
+                num_workers=2,
+                persistent_workers=False,
+                pin_memory=True,
+            )
+            warm_iter = tqdm.tqdm(
+                warm_loader,
+                desc="Warm GPU cache",
+                disable=world_rank != 0,
+            )
+            for warm_data in warm_iter:
+                warm_view_id = int(warm_data["image_id"][0].item())
+                cache_manager.prefetch(
+                    warm_view_id,
+                    lambda batch=warm_data: _to_device_batch(batch),
+                )
+            torch.cuda.current_stream().wait_stream(cache_manager.transfer_stream)
+
+        _fill_data_queue()
 
         for step in pbar:
             # Start nsys profiler
@@ -945,30 +1212,18 @@ class Runner:
 
             # NTVX Range 1: Data Loading
             nvtx.range_push("Data_Loading")
-            # Peek-ahead: consume pre-fetched batch, advance iterator for next step
-            data = next_data
-            try:
-                next_data = next(trainloader_iter)
-            except StopIteration:
-                trainloader_iter = iter(trainloader)
-                next_data = next(trainloader_iter)
+            data = data_queue.popleft()
+            _fill_data_queue()
 
-            view_id = data["image_id"][0].item()
+            view_id = int(data["image_id"][0].item())
 
 
             # Cache raw image inputs or load if cache disabled
-            def _load_data():
-                return {
-                    "pixels": data["image"].to(device, non_blocking=True).float() / 255.0,
-                    "camtoworlds": data["camtoworld"].to(device, non_blocking=True),
-                    "Ks": data["K"].to(device, non_blocking=True),
-                    "image_ids": data["image_id"].to(device, non_blocking=True),
-                    "camera_idcs": data["camera_idx"].to(device, non_blocking=True),
-                    "masks": data["mask"].to(device, non_blocking=True) if data.get("mask") is not None else None,
-                    "exposure": data["exposure"].to(device, non_blocking=True) if "exposure" in data else None,
-                }
-            if cfg.enable_input_cache:
-                cached_data = self.cache_manager.get_cache(view_id, _load_data)
+            def _load_data(batch=data):
+                return _to_device_batch(batch)
+
+            if cache_manager is not None:
+                cached_data = cache_manager.get_cache(view_id, _load_data)
             else:
                 cached_data = _load_data()
             
@@ -997,22 +1252,28 @@ class Runner:
             if cfg.pose_opt:
                 camtoworlds = self.pose_adjust(camtoworlds, image_ids)
 
-            torch.cuda.current_stream().wait_stream(self.cache_manager.transfer_stream)
+            if cache_manager is not None:
+                # Use per-view CUDA events instead of wait_stream so the GPU-side
+                # dependency is granular (only this view's transfer) and the CPU
+                # never stalls waiting for unrelated future prefetch work.
+                if view_id in _prefetch_events:
+                    _prefetch_events.pop(view_id).wait()
+                else:
+                    torch.cuda.current_stream().wait_stream(cache_manager.transfer_stream)
 
-            # Kick off async prefetch for next step (runs during forward+backward+optimizer)
-            if cfg.enable_input_cache and cfg.enable_prefetch:
-                _nd = next_data
-                def _prefetch_load():
-                    return {
-                        "pixels": _nd["image"].to(device, non_blocking=True).float() / 255.0,
-                        "camtoworlds": _nd["camtoworld"].to(device, non_blocking=True),
-                        "Ks": _nd["K"].to(device, non_blocking=True),
-                        "image_ids": _nd["image_id"].to(device, non_blocking=True),
-                        "camera_idcs": _nd["camera_idx"].to(device, non_blocking=True),
-                        "masks": _nd["mask"].to(device, non_blocking=True) if _nd.get("mask") is not None else None,
-                        "exposure": _nd["exposure"].to(device, non_blocking=True) if "exposure" in _nd else None,
-                    }
-                self.cache_manager.prefetch(next_data["image_id"][0].item(), _prefetch_load)
+            # Kick off async prefetch for upcoming steps.
+            if cache_manager is not None and prefetch_enabled:
+                for _nd in list(data_queue)[:prefetch_lookahead]:
+                    next_view_id = int(_nd["image_id"][0].item())
+                    cache_manager.prefetch(
+                        next_view_id,
+                        lambda batch=_nd: _to_device_batch(batch),
+                    )
+                    # Record completion event on transfer_stream so consumption
+                    # can wait precisely for this view rather than all pending work.
+                    _evt = torch.cuda.Event()
+                    _evt.record(cache_manager.transfer_stream)
+                    _prefetch_events[next_view_id] = _evt
 
             nvtx.range_pop()
 
@@ -1024,16 +1285,21 @@ class Runner:
             use_culling = cfg.enable_frustum_culling if step > WARMUP_STEPS else False
 
             # Pre-rendering frustum culling (CLM paper §5.1): drop Gaussians
-            # that are outside the view frustum before rasterization
+            # that are outside the view frustum before rasterization.
+            # The mask is recomputed every frustum_cull_interval steps and
+            # invalidated after densification (when N changes).
             if use_culling:
-                cull_mask = self.frustum_cull(
-                    camtoworlds=camtoworlds,
-                    Ks=Ks,
-                    width=width,
-                    height=height,
-                    step=step,
-                    near_plane=cfg.near_plane,
-                )
+                if _cached_cull_mask is None or (step - _cull_mask_step) >= cfg.frustum_cull_interval:
+                    _cached_cull_mask = self.frustum_cull(
+                        camtoworlds=camtoworlds,
+                        Ks=Ks,
+                        width=width,
+                        height=height,
+                        step=step,
+                        near_plane=cfg.near_plane,
+                    )
+                    _cull_mask_step = step
+                cull_mask = _cached_cull_mask
             else:
                 cull_mask = None
 
@@ -1054,7 +1320,6 @@ class Runner:
                 external_buffers=None, 
                 cull_mask=cull_mask,
             )
-            
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
             else:
@@ -1123,8 +1388,10 @@ class Runner:
             (loss / optimizer_stride).backward()
             nvtx.range_pop()
 
-            # Loss update 
-            desc = f"loss={loss.item():.3f}| sh degree={sh_degree_to_use}| "
+            # Loss update — sync only every 10 steps to avoid per-step cudaStreamSync
+            if step % 10 == 0:
+                _last_loss = loss.item()
+            desc = f"loss={_last_loss:.3f}| sh degree={sh_degree_to_use}| "
             if cfg.depth_loss:
                 desc += f"depth loss={depthloss.item():.6f}| "
             if cfg.pose_opt and cfg.pose_noise:
@@ -1160,6 +1427,7 @@ class Runner:
                 info=info,
                 packed=cfg.packed,
             )
+            _cached_cull_mask = None  # N may have changed after densification
 
             # Zero info grads so densification sees per-step signals, not accumulated
             if optimizer_stride > 1:
@@ -1186,17 +1454,17 @@ class Runner:
             # Gsplat writer --------------------------------------------------------- 
             if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
-                self.writer.add_scalar("train/loss", loss.item(), step)
-                self.writer.add_scalar("train/l1loss", l1loss.item(), step)
-                self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
+                self.writer.add_scalar("train/loss", loss.detach(), step)
+                self.writer.add_scalar("train/l1loss", l1loss.detach(), step)
+                self.writer.add_scalar("train/ssimloss", ssimloss.detach(), step)
                 self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
                 self.writer.add_scalar("train/mem", mem, step)
                 if cfg.depth_loss:
-                    self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+                    self.writer.add_scalar("train/depthloss", depthloss.detach(), step)
                 if cfg.post_processing is not None:
                     self.writer.add_scalar(
                         "train/post_processing_reg_loss",
-                        post_processing_reg_loss.item(),
+                        post_processing_reg_loss.detach(),
                         step,
                     )
                 if cfg.tb_save_image:
