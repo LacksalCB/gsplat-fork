@@ -1,9 +1,9 @@
 shopt -s nullglob
-SCENE_DIR="data/360_v2"
+SCENE_DIR=""
 SCENE_LIST=($1)
 RESULT_DIR=$2
 if [ -z "$3" ]; then
-	DEVICE=2
+	DEVICE=0
 else 
 	DEVICE=$3
 fi
