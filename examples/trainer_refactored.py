@@ -942,7 +942,7 @@ class Runner:
         else:
             if cull_idx is not None:
                 sh0_in = self.splats["sh0"][cull_idx]
-                shN_in = self.splats["shN"][cull_idx].detach()
+                shN_in = self.splats["shN"][cull_idx]
                 colors = torch.cat([sh0_in, shN_in], 1)
             else:
                 colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)
@@ -1152,6 +1152,11 @@ class Runner:
         pbar = tqdm.tqdm(range(init_step, max_steps))
         _last_loss: float = 0.0          # cached scalar to avoid per-step GPU sync
         _prefetch_events: dict = {}      # view_id → CUDA event for granular stream sync
+        # Pre-allocated proxy buffers for N-shaped densification signal.
+        # Avoids per-step GPU allocation (new_zeros) that caused 3x Memset overhead.
+        # Reallocated only when N changes after densification.
+        _proxy_means2d: Optional[Tensor] = None   # [C, N, 2] — swapped into info["means2d"]
+        _proxy_signal:  Optional[Tensor] = None   # [C, N, 2] — scratch for scatter ops
 
         def _next_train_batch():
             nonlocal trainloader_iter
@@ -1358,11 +1363,20 @@ class Runner:
             if cull_mask is not None and self._last_cull_idx is not None:
                 C = info["means2d"].shape[0]
                 N = self._last_N_full
-                _means2d_proxy = info["means2d"].new_zeros(C, N, 2)
-                _means2d_proxy.requires_grad_(True)
-                _means2d_proxy.retain_grad()
-                info["means2d"] = _means2d_proxy
-                # Fix radii to N-shape so the strategy's visibility check covers all N
+                # Reuse pre-allocated buffer if shape matches; reallocate only after
+                # densification changes N (which clears _view_cull_masks too).
+                if _proxy_means2d is None or _proxy_means2d.shape != (C, N, 2):
+                    _proxy_means2d = torch.zeros(C, N, 2, device=device)
+                    _proxy_signal  = torch.zeros(C, N, 2, device=device)
+                # Clear state from previous step — in-place, no allocation.
+                _proxy_means2d.grad = None
+                _proxy_means2d.detach_()
+                _proxy_means2d.zero_()
+                _proxy_means2d.requires_grad_(True)
+                _proxy_means2d.retain_grad()
+                _means2d_proxy = _proxy_means2d
+                info["means2d"] = _proxy_means2d
+                # Scatter radii to N-shape so the strategy's visibility check covers all N
                 radii_full = info["radii"].new_zeros(C, N, *info["radii"].shape[2:])
                 radii_full[:, self._last_cull_idx] = info["radii"]
                 info["radii"] = radii_full
@@ -1428,11 +1442,23 @@ class Runner:
             # proxy at the culled-Gaussian positions so the strategy reads
             # correctly-indexed densification signal. Culled Gaussians get zero.
             if _means2d_proxy is not None and self._last_cull_idx is not None:
+                idx = self._last_cull_idx
+
+                # Scatter .absgrad — what DefaultStrategy reads when absgrad=True.
+                # gsplat's CUDA backward kernel sets this as a custom attribute;
+                # not the same as .grad. Handle both paths for forward-compatibility.
+                actual_absgrad = getattr(self._last_means2d_m, 'absgrad', None)
+                if actual_absgrad is not None:
+                    _proxy_signal.zero_()
+                    _proxy_signal[:, idx, :] = actual_absgrad
+                    _means2d_proxy.absgrad = _proxy_signal.clone()
+
+                # Scatter .grad — used when absgrad=False (the default).
                 actual_grad = self._last_means2d_m.grad
                 if actual_grad is not None:
-                    proxy_grad = _means2d_proxy.new_zeros(_means2d_proxy.shape)
-                    proxy_grad[:, self._last_cull_idx, :] = actual_grad
-                    _means2d_proxy.grad = proxy_grad
+                    _proxy_signal.zero_()
+                    _proxy_signal[:, idx, :] = actual_grad
+                    _means2d_proxy.grad = _proxy_signal.clone()
 
             # Loss update — sync only every 10 steps to avoid per-step cudaStreamSync
             if step % 10 == 0:
