@@ -792,6 +792,10 @@ class Runner:
         # Track if Gaussians are frozen (for controller distillation)
         self._gaussians_frozen = False
 
+        # Per-view frustum cull mask cache. Keyed by view_id (image_id int).
+        # Invalidated whenever N changes (after densification/pruning).
+        self._view_cull_masks: Dict[int, Tensor] = {}
+
     def freeze_gaussians(self):
         """Freeze all Gaussian parameters for controller distillation.
 
@@ -899,26 +903,30 @@ class Runner:
         scales = torch.exp(self.splats["scales"])  # [N, 3]
         opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
         image_ids = kwargs.pop("image_ids", None)
-        if cull_mask is not None:
-            # Zero out culled Gaussians via opacity rather than slicing parameters.
-            # Slicing nn.Parameters (e.g. shN[cull_mask]) bakes a gather into the
-            # autograd graph and forces an expensive scatter in backward
-            # (indexing_backward_kernel) that costs ~16x more than the rasterizer
-            # savings.  Multiplying by cull_mask uses a cheap vectorized elementwise
-            # kernel in both directions and lets the rasterizer's own radii=0 path
-            # skip culled Gaussians during tile intersection and SH evaluation.
-            opacities = opacities * cull_mask
 
-        # Check if image in cache before raster (from update)
-        image_ids = kwargs.pop("image_ids", None)
+        # Slice to M visible Gaussians so the rasterizer does less work.
+        # self._last_cull_idx / _last_N_full / _last_means2d_m are read in
+        # train() after backward to scatter the M-shaped .grad into an
+        # N-shaped proxy consumed by DefaultStrategy.step_post_backward.
+        N_full = means.shape[0]
+        cull_idx = None
+        if cull_mask is not None:
+            cull_idx = cull_mask.nonzero(as_tuple=False).squeeze(1)  # [M]
+            means_in     = means[cull_idx]
+            quats_in     = quats[cull_idx]
+            scales_in    = scales[cull_idx]
+            opacities_in = opacities[cull_idx]
+        else:
+            means_in, quats_in, scales_in, opacities_in = means, quats, scales, opacities
+        self._last_cull_idx = cull_idx
+        self._last_N_full   = N_full
+
         if external_buffers is not None:
-            # i.e. if in cache, use cache
             return (
                 external_buffers["render_colors"],
                 external_buffers["render_alphas"],
-                external_buffers["info"]
+                external_buffers["info"],
             )
-
 
         if self.cfg.app_opt:
             colors = self.app_module(
@@ -929,18 +937,25 @@ class Runner:
             )
             colors = colors + self.splats["colors"]
             colors = torch.sigmoid(colors)
+            if cull_idx is not None:
+                colors = colors[cull_idx]
         else:
-            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+            if cull_idx is not None:
+                sh0_in = self.splats["sh0"][cull_idx]
+                shN_in = self.splats["shN"][cull_idx].detach()
+                colors = torch.cat([sh0_in, shN_in], 1)
+            else:
+                colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)
 
         if rasterize_mode is None:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         if camera_model is None:
             camera_model = self.cfg.camera_model
         render_colors, render_alphas, info = rasterization(
-            means=means,
-            quats=quats,
-            scales=scales,
-            opacities=opacities,
+            means=means_in,
+            quats=quats_in,
+            scales=scales_in,
+            opacities=opacities_in,
             colors=colors,
             viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
             Ks=Ks,  # [C, 3, 3]
@@ -960,6 +975,13 @@ class Runner:
             with_eval3d=self.cfg.with_eval3d,
             **kwargs,
         )
+
+        # Store the rasterizer's M-shaped means2d so train() can read its .grad
+        # after backward and scatter it into the N-shaped proxy for the strategy.
+        self._last_means2d_m = info["means2d"]
+        if cull_idx is not None:
+            self._last_means2d_m.retain_grad()
+
         if masks is not None:
             render_colors[~masks] = 0
 
@@ -1128,8 +1150,6 @@ class Runner:
         # Training Loop
         global_tic = time.time()
         pbar = tqdm.tqdm(range(init_step, max_steps))
-        _cached_cull_mask: Optional[Tensor] = None  # reused across frustum_cull_interval steps
-        _cull_mask_step: int = -9999
         _last_loss: float = 0.0          # cached scalar to avoid per-step GPU sync
         _prefetch_events: dict = {}      # view_id → CUDA event for granular stream sync
 
@@ -1284,13 +1304,13 @@ class Runner:
             WARMUP_STEPS = 4000
             use_culling = cfg.enable_frustum_culling if step > WARMUP_STEPS else False
 
-            # Pre-rendering frustum culling (CLM paper §5.1): drop Gaussians
-            # that are outside the view frustum before rasterization.
-            # The mask is recomputed every frustum_cull_interval steps and
-            # invalidated after densification (when N changes).
+            # Per-view frustum cull mask: computed once per unique view, then
+            # cached by view_id. The mask is valid for the lifetime of the current
+            # Gaussian set; self._view_cull_masks is cleared after any
+            # step_post_backward that may change N (densification/pruning).
             if use_culling:
-                if _cached_cull_mask is None or (step - _cull_mask_step) >= cfg.frustum_cull_interval:
-                    _cached_cull_mask = self.frustum_cull(
+                if view_id not in self._view_cull_masks:
+                    self._view_cull_masks[view_id] = self.frustum_cull(
                         camtoworlds=camtoworlds,
                         Ks=Ks,
                         width=width,
@@ -1298,8 +1318,7 @@ class Runner:
                         step=step,
                         near_plane=cfg.near_plane,
                     )
-                    _cull_mask_step = step
-                cull_mask = _cached_cull_mask
+                cull_mask = self._view_cull_masks[view_id]
             else:
                 cull_mask = None
 
@@ -1330,6 +1349,23 @@ class Runner:
                 colors = colors + bkgd * (1.0 - alphas)
 
             nvtx.range_pop()
+
+            # If culling sliced to M Gaussians, build an N-shaped proxy for
+            # means2d so the strategy accumulates densification signal at the
+            # correct global indices. .grad is populated manually after backward
+            # by scattering the rasterizer's M-shaped means2d.grad.
+            _means2d_proxy = None
+            if cull_mask is not None and self._last_cull_idx is not None:
+                C = info["means2d"].shape[0]
+                N = self._last_N_full
+                _means2d_proxy = info["means2d"].new_zeros(C, N, 2)
+                _means2d_proxy.requires_grad_(True)
+                _means2d_proxy.retain_grad()
+                info["means2d"] = _means2d_proxy
+                # Fix radii to N-shape so the strategy's visibility check covers all N
+                radii_full = info["radii"].new_zeros(C, N, *info["radii"].shape[2:])
+                radii_full[:, self._last_cull_idx] = info["radii"]
+                info["radii"] = radii_full
 
             # Pre backward (basically just setup)
             nvtx.range_push("Strategy_Pre_Backward")
@@ -1388,6 +1424,16 @@ class Runner:
             (loss / optimizer_stride).backward()
             nvtx.range_pop()
 
+            # Scatter the rasterizer's M-shaped means2d.grad into the N-shaped
+            # proxy at the culled-Gaussian positions so the strategy reads
+            # correctly-indexed densification signal. Culled Gaussians get zero.
+            if _means2d_proxy is not None and self._last_cull_idx is not None:
+                actual_grad = self._last_means2d_m.grad
+                if actual_grad is not None:
+                    proxy_grad = _means2d_proxy.new_zeros(_means2d_proxy.shape)
+                    proxy_grad[:, self._last_cull_idx, :] = actual_grad
+                    _means2d_proxy.grad = proxy_grad
+
             # Loss update — sync only every 10 steps to avoid per-step cudaStreamSync
             if step % 10 == 0:
                 _last_loss = loss.item()
@@ -1399,7 +1445,7 @@ class Runner:
                 pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
                 desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
-    
+
              # Post backward
             nvtx.range_push("Strategy_Post_Backward")
          
@@ -1427,7 +1473,7 @@ class Runner:
                 info=info,
                 packed=cfg.packed,
             )
-            _cached_cull_mask = None  # N may have changed after densification
+            self._view_cull_masks.clear()  # N changed; all cached masks are stale
 
             # Zero info grads so densification sees per-step signals, not accumulated
             if optimizer_stride > 1:
