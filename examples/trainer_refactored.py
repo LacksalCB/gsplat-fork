@@ -1185,7 +1185,9 @@ class Runner:
             return {
                 # Keep source image dtype (typically uint8) in cache to reduce VRAM.
                 # Convert to float [0, 1] only at consumption time.
-                "pixels": batch["image"].to(device, non_blocking=True),
+                # Colmap Dataset returns float image tensors in [0, 255], so convert
+                # explicitly to uint8 for compact caching and correct later scaling.
+                "pixels": batch["image"].to(device, non_blocking=True).to(torch.uint8),
                 "camtoworlds": batch["camtoworld"].to(device, non_blocking=True),
                 "Ks": batch["K"].to(device, non_blocking=True),
                 "image_ids": batch["image_id"].to(device, non_blocking=True),
