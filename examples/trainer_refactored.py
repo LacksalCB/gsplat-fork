@@ -1,6 +1,7 @@
 import json
 import math
 import os
+from itertools import islice
 
 # handle cache eviction clearing
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256"
@@ -112,14 +113,26 @@ class BaseGPUCacheManager:
         self._store(view_id, new_entry)
         return new_entry
 
+    def has_view(self, view_id: int) -> bool:
+        return view_id in self.cache
+
+    def can_prefetch(self, high_watermark: float = 0.9) -> bool:
+        watermark = max(0.0, min(1.0, high_watermark))
+        return self.current_bytes < int(self.limit_bytes * watermark)
+
     def prefetch(
         self, view_id: int, compute_func: Callable[[], Dict[str, Optional[torch.Tensor]]]
-    ):
+    ) -> bool:
+        # Skip speculative prefetch once cache is near capacity to avoid churn.
+        if not self.can_prefetch():
+            return False
         if view_id in self.cache:
-            return
+            return False
         with torch.cuda.stream(self.transfer_stream):
             new_entry = compute_func()
+        old_bytes = self.current_bytes
         self._store(view_id, new_entry)
+        return (view_id in self.cache) and (self.current_bytes >= old_bytes)
 
     def purge_all(self):
         self.cache.clear()
@@ -795,6 +808,7 @@ class Runner:
         # Per-view frustum cull mask cache. Keyed by view_id (image_id int).
         # Invalidated whenever N changes (after densification/pruning).
         self._view_cull_masks: Dict[int, Tensor] = {}
+        self._view_cull_mask_steps: Dict[int, int] = {}
 
     def freeze_gaussians(self):
         """Freeze all Gaussian parameters for controller distillation.
@@ -970,7 +984,7 @@ class Runner:
             sparse_grad=self.cfg.sparse_grad,
             rasterize_mode=rasterize_mode,
             distributed=self.world_size > 1,
-            camera_model=self.cfg.camera_model,
+            camera_model=camera_model,
             with_ut=self.cfg.with_ut,
             with_eval3d=self.cfg.with_eval3d,
             **kwargs,
@@ -1157,6 +1171,7 @@ class Runner:
         # Reallocated only when N changes after densification.
         _proxy_means2d: Optional[Tensor] = None   # [C, N, 2] — swapped into info["means2d"]
         _proxy_signal:  Optional[Tensor] = None   # [C, N, 2] — scratch for scatter ops
+        _proxy_absgrad: Optional[Tensor] = None   # [C, N, 2] — holds absgrad, avoids clone()
 
         def _next_train_batch():
             nonlocal trainloader_iter
@@ -1168,7 +1183,9 @@ class Runner:
 
         def _to_device_batch(batch):
             return {
-                "pixels": batch["image"].to(device, non_blocking=True).float() / 255.0,
+                # Keep source image dtype (typically uint8) in cache to reduce VRAM.
+                # Convert to float [0, 1] only at consumption time.
+                "pixels": batch["image"].to(device, non_blocking=True),
                 "camtoworlds": batch["camtoworld"].to(device, non_blocking=True),
                 "Ks": batch["K"].to(device, non_blocking=True),
                 "image_ids": batch["image_id"].to(device, non_blocking=True),
@@ -1181,6 +1198,16 @@ class Runner:
                 "exposure": (
                     batch["exposure"].to(device, non_blocking=True)
                     if "exposure" in batch
+                    else None
+                ),
+                "points": (
+                    batch["points"].to(device, non_blocking=True)
+                    if cfg.depth_loss
+                    else None
+                ),
+                "depths_gt": (
+                    batch["depths"].to(device, non_blocking=True)
+                    if cfg.depth_loss
                     else None
                 ),
             }
@@ -1255,6 +1282,10 @@ class Runner:
             # Fetch inputs from cache
             # Same parameters as gsplat
             pixels = cached_data["pixels"] # [ 1, H, W, 3 ]
+            if pixels.dtype == torch.uint8:
+                pixels = pixels.float() / 255.0
+            else:
+                pixels = pixels.float()
             camtoworlds = cached_data["camtoworlds"] # [ 1, 4, 4 ]
             Ks = cached_data["Ks"] # [ 1, 3, 3 ]
             image_ids = cached_data["image_ids"]
@@ -1262,10 +1293,10 @@ class Runner:
             masks = cached_data["masks"] # [ 1, H, W ]
             exposure = cached_data["exposure"] # [ B, ]
 
-            # Loss not cached
+            # Depth supervision path now also uses cached, device-resident tensors.
             if cfg.depth_loss:
-                points = data["points"].to(device) # [
-                depths_gt = data["depths"].to(device)
+                points = cached_data["points"]
+                depths_gt = cached_data["depths_gt"]
 
             height, width = pixels.shape[1:3]
 
@@ -1278,27 +1309,42 @@ class Runner:
                 camtoworlds = self.pose_adjust(camtoworlds, image_ids)
 
             if cache_manager is not None:
-                # Use per-view CUDA events instead of wait_stream so the GPU-side
-                # dependency is granular (only this view's transfer) and the CPU
-                # never stalls waiting for unrelated future prefetch work.
-                if view_id in _prefetch_events:
-                    _prefetch_events.pop(view_id).wait()
-                else:
-                    torch.cuda.current_stream().wait_stream(cache_manager.transfer_stream)
+                # Wait only when this exact view had an async transfer enqueued.
+                # Avoid global wait_stream synchronization that can serialize work.
+                evt = _prefetch_events.pop(view_id, None)
+                if evt is not None:
+                    evt.wait()
 
             # Kick off async prefetch for upcoming steps.
             if cache_manager is not None and prefetch_enabled:
-                for _nd in list(data_queue)[:prefetch_lookahead]:
+                prefetched_this_step = 0
+                queued_view_ids = set()
+                max_prefetch_per_step = 1  # throttle transfer pressure vs. compute
+                for _nd in islice(data_queue, prefetch_lookahead):
                     next_view_id = int(_nd["image_id"][0].item())
-                    cache_manager.prefetch(
+                    if next_view_id == view_id:
+                        continue
+                    if next_view_id in queued_view_ids:
+                        continue
+                    queued_view_ids.add(next_view_id)
+                    if next_view_id in _prefetch_events:
+                        continue
+                    if cache_manager.has_view(next_view_id):
+                        continue
+                    enqueued = cache_manager.prefetch(
                         next_view_id,
                         lambda batch=_nd: _to_device_batch(batch),
                     )
+                    if not enqueued:
+                        continue
                     # Record completion event on transfer_stream so consumption
                     # can wait precisely for this view rather than all pending work.
                     _evt = torch.cuda.Event()
                     _evt.record(cache_manager.transfer_stream)
                     _prefetch_events[next_view_id] = _evt
+                    prefetched_this_step += 1
+                    if prefetched_this_step >= max_prefetch_per_step:
+                        break
 
             nvtx.range_pop()
 
@@ -1314,7 +1360,13 @@ class Runner:
             # Gaussian set; self._view_cull_masks is cleared after any
             # step_post_backward that may change N (densification/pruning).
             if use_culling:
-                if view_id not in self._view_cull_masks:
+                recalc_interval = max(int(cfg.frustum_cull_interval), 1)
+                last_mask_step = self._view_cull_mask_steps.get(view_id, -10**9)
+                needs_recompute = (
+                    view_id not in self._view_cull_masks
+                    or (step - last_mask_step) >= recalc_interval
+                )
+                if needs_recompute:
                     self._view_cull_masks[view_id] = self.frustum_cull(
                         camtoworlds=camtoworlds,
                         Ks=Ks,
@@ -1323,6 +1375,7 @@ class Runner:
                         step=step,
                         near_plane=cfg.near_plane,
                     )
+                    self._view_cull_mask_steps[view_id] = step
                 cull_mask = self._view_cull_masks[view_id]
             else:
                 cull_mask = None
@@ -1339,6 +1392,7 @@ class Runner:
                 image_ids=image_ids,
                 render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                 masks=masks,
+                frame_idcs=image_ids,
                 camera_idcs=camera_idcs,
                 exposure=exposure,
                 external_buffers=None, 
@@ -1368,6 +1422,7 @@ class Runner:
                 if _proxy_means2d is None or _proxy_means2d.shape != (C, N, 2):
                     _proxy_means2d = torch.zeros(C, N, 2, device=device)
                     _proxy_signal  = torch.zeros(C, N, 2, device=device)
+                    _proxy_absgrad = torch.zeros(C, N, 2, device=device)
                 # Clear state from previous step — in-place, no allocation.
                 _proxy_means2d.grad = None
                 _proxy_means2d.detach_()
@@ -1451,7 +1506,8 @@ class Runner:
                 if actual_absgrad is not None:
                     _proxy_signal.zero_()
                     _proxy_signal[:, idx, :] = actual_absgrad
-                    _means2d_proxy.absgrad = _proxy_signal.clone()
+                    _proxy_absgrad.copy_(_proxy_signal)
+                    _means2d_proxy.absgrad = _proxy_absgrad
 
                 # Scatter .grad — used when absgrad=False (the default).
                 actual_grad = self._last_means2d_m.grad
@@ -1477,20 +1533,20 @@ class Runner:
          
             # Denisfication strategy
             base_thresh = 0.0002
-
-            if hasattr(cfg.strategy, "densify_grad_thresh"):
+            previous_grow_grad2d = None
+            if isinstance(cfg.strategy, DefaultStrategy):
+                previous_grow_grad2d = cfg.strategy.grow_grad2d
                 if step < WARMUP_STEPS:
-                    cfg.strategy.densify_grad_thresh = base_thresh * 0.5
+                    cfg.strategy.grow_grad2d = base_thresh * 0.5
                 else:
-                    cfg.strategy.densify_grad_thresh = base_thresh
-            else:
-                pass
+                    cfg.strategy.grow_grad2d = base_thresh
 
             if optimizer_stride > 1:
                 for v in info.values():
                     if isinstance(v, torch.Tensor) and v.grad is not None:
                         v.grad.mul_(optimizer_stride)
 
+            n_gaussians_before = len(self.splats["means"])
             cfg.strategy.step_post_backward(
                 params=self.splats,
                 optimizers=self.optimizers,
@@ -1499,7 +1555,10 @@ class Runner:
                 info=info,
                 packed=cfg.packed,
             )
-            self._view_cull_masks.clear()  # N changed; all cached masks are stale
+            if len(self.splats["means"]) != n_gaussians_before:
+                # Densification/pruning changed N, so all cached per-view masks are stale.
+                self._view_cull_masks.clear()
+                self._view_cull_mask_steps.clear()
 
             # Zero info grads so densification sees per-step signals, not accumulated
             if optimizer_stride > 1:
@@ -1507,7 +1566,8 @@ class Runner:
                     if isinstance(v, torch.Tensor) and v.grad is not None:
                         v.grad.zero_()
 
-            cfg.strategy.densify_grad_threshold = base_thresh
+            if previous_grow_grad2d is not None:
+                cfg.strategy.grow_grad2d = previous_grow_grad2d
             nvtx.range_pop()
 
             # Optimizer update with stride

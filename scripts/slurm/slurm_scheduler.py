@@ -9,8 +9,8 @@ project_dir = Path("/scratch/rhm4nj/gpu_arch/gsplat-fork")
 # project_dir = Path("/bigtemp/rhm4nj/gpu_arch/project/gsplat-fork")
 TEMPLATE_PATH = str(project_dir / "scripts/slurm/profile_gsplat_template_rivanna.slurm")
 
-mode = "grid"   # "grid" = cartesian product, "zip" = pair by index (all lists must be same length)
-prefix = "_rubble_cache_ablate"
+mode = "zip"   # "grid" = cartesian product, "zip" = pair by index (all lists must be same length)
+prefix = "_cache_cull_psnr_guard"
 
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 base_dir = project_dir / "scripts/slurm/outputs" / Path(timestamp + prefix)
@@ -38,19 +38,37 @@ fixed_params = {
     "project_dir": project_dir,
     "gpus": 1,
     "cpus": 4,
-    "mem": "32G",
+    "mem": "64G",
     "time": "05:00:00",
     "force_overwrite": "true",
     "gpu_type": "a6000",
-    "--optimizer-stride": 4,
-    "--frustum-cull-interval": 10,
     "scenes": "data/rubble-colmap",
+    "--optimizer-stride": 1,
 }
 
 sweep_params = {
-    "--enable-frustum-culling": [True, False],
-    "--cache-mode": ["none", "lru", "lfu", "twoq", "warm_all"],
+    "--cache-mode": [
+        "none",      # baseline
+        "lfu",       # caching
+        "twoq",      # caching alt
+        "warm_all",  # precaching
+        "lfu",       # + culling
+        "twoq",      # + culling
+        "lfu",       # + prefetch
+        "none",      # culling-only control
+    ],
+    "--enable-frustum-culling": [
+        False, False, False, False, True, True, False, True
+    ],
+    "--enable-prefetch": [
+        False, False, False, False, False, False, True, False
+    ],
+    "--frustum-cull-interval": [
+        10, 10, 10, 10, 10, 10, 10, 10
+    ],
 }
+
+
 
 # --- Helpers ---
 profile_prefix = str(results_dir / "profile_gsplat")
