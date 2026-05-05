@@ -10,7 +10,8 @@ project_dir = Path("/scratch/rhm4nj/gpu_arch/gsplat-fork")
 TEMPLATE_PATH = str(project_dir / "scripts/slurm/profile_gsplat_template_rivanna.slurm")
 
 mode = "zip"   # "grid" = cartesian product, "zip" = pair by index (all lists must be same length)
-prefix = "_cache_cull_psnr_guard"
+prefix = "_QUICK_frustum_gid_postrefine_with_true_baseline"
+MAX_JOBS = 8
 
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 base_dir = project_dir / "scripts/slurm/outputs" / Path(timestamp + prefix)
@@ -42,30 +43,19 @@ fixed_params = {
     "time": "05:00:00",
     "force_overwrite": "true",
     "gpu_type": "a6000",
-    "scenes": "data/rubble-colmap",
     "--optimizer-stride": 1,
+    "scenes": "data/rubble-colmap",
 }
 
+# Quick three-way comparison:
+# 1. true baseline: no cache, no prefetch, no culling
+# 2. patched control: lru cache, no prefetch, no culling
+# 3. patched culling: lru cache, no prefetch, culling after refine_stop_iter
 sweep_params = {
-    "--cache-mode": [
-        "none",      # baseline
-        "lfu",       # caching
-        "twoq",      # caching alt
-        "warm_all",  # precaching
-        "lfu",       # + culling
-        "twoq",      # + culling
-        "lfu",       # + prefetch
-        "none",      # culling-only control
-    ],
-    "--enable-frustum-culling": [
-        False, False, False, False, True, True, False, True
-    ],
-    "--enable-prefetch": [
-        False, False, False, False, False, False, True, False
-    ],
-    "--frustum-cull-interval": [
-        10, 10, 10, 10, 10, 10, 10, 10
-    ],
+    "--vram-thresh-gb": [10.0, 10.0, 10.0],
+    "--cache-mode": ["none", "lru", "lru"],
+    "--enable-prefetch": [False, False, False],
+    "--enable-frustum-culling": [False, False, True],
 }
 
 
@@ -129,7 +119,42 @@ elif mode == "zip":
 else:
     raise ValueError("mode must be 'grid' or 'zip'")
 
+# Keep only meaningful cache/prefetch/cache-size combinations so experiment count
+# stays focused and bounded.
+if mode == "grid":
+    key_to_idx = {k: i for i, k in enumerate(keys)}
+    cm_idx = key_to_idx.get("--cache-mode")
+    pf_idx = key_to_idx.get("--enable-prefetch")
+    vt_idx = key_to_idx.get("--vram-thresh-gb")
+
+    if cm_idx is not None and pf_idx is not None:
+        control_vram = values[vt_idx][0] if vt_idx is not None else None
+        filtered = []
+        for combo in combinations:
+            cache_mode = combo[cm_idx]
+            prefetch = combo[pf_idx]
+            vram_thresh = combo[vt_idx] if vt_idx is not None else None
+
+            # With no cache, prefetch is a no-op and cache size is irrelevant.
+            if cache_mode == "none":
+                if prefetch:
+                    continue
+                if vt_idx is not None and vram_thresh != control_vram:
+                    continue
+
+            # warm_all pre-populates cache; async prefetch is redundant there.
+            if cache_mode == "warm_all" and prefetch:
+                continue
+
+            filtered.append(combo)
+        combinations = filtered
+
 total_jobs = len(combinations)
+if total_jobs > MAX_JOBS:
+    raise ValueError(
+        f"Filtered sweep still has {total_jobs} jobs (> {MAX_JOBS}). "
+        "Narrow sweep_params or tighten non-redundant filtering."
+    )
 print(f"\ntotal jobs to generate: {total_jobs}")
 print("\nJobs:")
 

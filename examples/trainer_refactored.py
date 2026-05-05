@@ -919,10 +919,6 @@ class Runner:
         image_ids = kwargs.pop("image_ids", None)
 
         # Slice to M visible Gaussians so the rasterizer does less work.
-        # self._last_cull_idx / _last_N_full / _last_means2d_m are read in
-        # train() after backward to scatter the M-shaped .grad into an
-        # N-shaped proxy consumed by DefaultStrategy.step_post_backward.
-        N_full = means.shape[0]
         cull_idx = None
         if cull_mask is not None:
             cull_idx = cull_mask.nonzero(as_tuple=False).squeeze(1)  # [M]
@@ -932,8 +928,6 @@ class Runner:
             opacities_in = opacities[cull_idx]
         else:
             means_in, quats_in, scales_in, opacities_in = means, quats, scales, opacities
-        self._last_cull_idx = cull_idx
-        self._last_N_full   = N_full
 
         if external_buffers is not None:
             return (
@@ -990,11 +984,10 @@ class Runner:
             **kwargs,
         )
 
-        # Store the rasterizer's M-shaped means2d so train() can read its .grad
-        # after backward and scatter it into the N-shaped proxy for the strategy.
-        self._last_means2d_m = info["means2d"]
+        # Let strategy map local (culled) Gaussian indices back to global ids.
+        # This avoids rebuilding dense N-shaped proxy tensors for means2d/radii.
         if cull_idx is not None:
-            self._last_means2d_m.retain_grad()
+            info["global_gaussian_ids"] = cull_idx
 
         if masks is not None:
             render_colors[~masks] = 0
@@ -1166,13 +1159,6 @@ class Runner:
         pbar = tqdm.tqdm(range(init_step, max_steps))
         _last_loss: float = 0.0          # cached scalar to avoid per-step GPU sync
         _prefetch_events: dict = {}      # view_id → CUDA event for granular stream sync
-        # Pre-allocated proxy buffers for N-shaped densification signal.
-        # Avoids per-step GPU allocation (new_zeros) that caused 3x Memset overhead.
-        # Reallocated only when N changes after densification.
-        _proxy_means2d: Optional[Tensor] = None   # [C, N, 2] — swapped into info["means2d"]
-        _proxy_signal:  Optional[Tensor] = None   # [C, N, 2] — scratch for scatter ops
-        _proxy_absgrad: Optional[Tensor] = None   # [C, N, 2] — holds absgrad, avoids clone()
-
         def _next_train_batch():
             nonlocal trainloader_iter
             try:
@@ -1355,7 +1341,12 @@ class Runner:
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
 
             WARMUP_STEPS = 4000
-            use_culling = cfg.enable_frustum_culling if step > WARMUP_STEPS else False
+            # Enable culling only after densification/refine has ended to avoid
+            # perturbing growth/prune dynamics and quality.
+            culling_start_step = WARMUP_STEPS
+            if isinstance(cfg.strategy, DefaultStrategy):
+                culling_start_step = max(culling_start_step, cfg.strategy.refine_stop_iter)
+            use_culling = cfg.enable_frustum_culling and (step >= culling_start_step)
 
             # Per-view frustum cull mask: computed once per unique view, then
             # cached by view_id. The mask is valid for the lifetime of the current
@@ -1410,33 +1401,6 @@ class Runner:
                 colors = colors + bkgd * (1.0 - alphas)
 
             nvtx.range_pop()
-
-            # If culling sliced to M Gaussians, build an N-shaped proxy for
-            # means2d so the strategy accumulates densification signal at the
-            # correct global indices. .grad is populated manually after backward
-            # by scattering the rasterizer's M-shaped means2d.grad.
-            _means2d_proxy = None
-            if cull_mask is not None and self._last_cull_idx is not None:
-                C = info["means2d"].shape[0]
-                N = self._last_N_full
-                # Reuse pre-allocated buffer if shape matches; reallocate only after
-                # densification changes N (which clears _view_cull_masks too).
-                if _proxy_means2d is None or _proxy_means2d.shape != (C, N, 2):
-                    _proxy_means2d = torch.zeros(C, N, 2, device=device)
-                    _proxy_signal  = torch.zeros(C, N, 2, device=device)
-                    _proxy_absgrad = torch.zeros(C, N, 2, device=device)
-                # Clear state from previous step — in-place, no allocation.
-                _proxy_means2d.grad = None
-                _proxy_means2d.detach_()
-                _proxy_means2d.zero_()
-                _proxy_means2d.requires_grad_(True)
-                _proxy_means2d.retain_grad()
-                _means2d_proxy = _proxy_means2d
-                info["means2d"] = _proxy_means2d
-                # Scatter radii to N-shape so the strategy's visibility check covers all N
-                radii_full = info["radii"].new_zeros(C, N, *info["radii"].shape[2:])
-                radii_full[:, self._last_cull_idx] = info["radii"]
-                info["radii"] = radii_full
 
             # Pre backward (basically just setup)
             nvtx.range_push("Strategy_Pre_Backward")
@@ -1494,29 +1458,6 @@ class Runner:
             # Call backward
             (loss / optimizer_stride).backward()
             nvtx.range_pop()
-
-            # Scatter the rasterizer's M-shaped means2d.grad into the N-shaped
-            # proxy at the culled-Gaussian positions so the strategy reads
-            # correctly-indexed densification signal. Culled Gaussians get zero.
-            if _means2d_proxy is not None and self._last_cull_idx is not None:
-                idx = self._last_cull_idx
-
-                # Scatter .absgrad — what DefaultStrategy reads when absgrad=True.
-                # gsplat's CUDA backward kernel sets this as a custom attribute;
-                # not the same as .grad. Handle both paths for forward-compatibility.
-                actual_absgrad = getattr(self._last_means2d_m, 'absgrad', None)
-                if actual_absgrad is not None:
-                    _proxy_signal.zero_()
-                    _proxy_signal[:, idx, :] = actual_absgrad
-                    _proxy_absgrad.copy_(_proxy_signal)
-                    _means2d_proxy.absgrad = _proxy_absgrad
-
-                # Scatter .grad — used when absgrad=False (the default).
-                actual_grad = self._last_means2d_m.grad
-                if actual_grad is not None:
-                    _proxy_signal.zero_()
-                    _proxy_signal[:, idx, :] = actual_grad
-                    _means2d_proxy.grad = _proxy_signal.clone()
 
             # Loss update — sync only every 10 steps to avoid per-step cudaStreamSync
             if step % 10 == 0:
