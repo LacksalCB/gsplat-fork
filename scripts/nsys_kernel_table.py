@@ -30,13 +30,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Metric display names (order preserved in output columns)
 METRICS = ["Time (%)", "Total Time", "Instances", "Avg", "Med", "Min", "Max", "StdDev"]
 
 
-# ---------------------------------------------------------------------------
-# nsys helpers
-# ---------------------------------------------------------------------------
 
 def run_kern_sum(nsys: str, rep_file: Path, timeunit: str, force_export: bool) -> str:
     """
@@ -48,7 +44,7 @@ def run_kern_sum(nsys: str, rep_file: Path, timeunit: str, force_export: bool) -
         "-r", "cuda_gpu_kern_sum",
         "-f", "csv",
         f"--timeunit={timeunit}",
-        "-o", "-",            # output to stdout
+        "-o", "-",
     ]
     if force_export:
         cmd.append("--force-export=true")
@@ -60,7 +56,7 @@ def run_kern_sum(nsys: str, rep_file: Path, timeunit: str, force_export: bool) -
     return result.stdout
 
 
-def parse_kern_sum(raw: str) -> list[dict]:
+def parseKernSum(raw: str) -> list[dict]:
     """
     Parse nsys cuda_gpu_kern_sum CSV output (stdout may contain progress lines
     before the CSV header).  Returns a list of row dicts.
@@ -68,7 +64,6 @@ def parse_kern_sum(raw: str) -> list[dict]:
     lines = raw.splitlines()
     header_idx = None
     for i, line in enumerate(lines):
-        # CSV header always starts with the Time column
         if line.startswith("Time (%)") or line.startswith('"Time (%)'):
             header_idx = i
             break
@@ -79,9 +74,6 @@ def parse_kern_sum(raw: str) -> list[dict]:
     return list(reader)
 
 
-# ---------------------------------------------------------------------------
-# Matching & aggregation
-# ---------------------------------------------------------------------------
 
 def match_rows(rows: list[dict], pattern: str) -> list[dict]:
     """Return rows whose Name contains *pattern* (case-insensitive)."""
@@ -89,7 +81,7 @@ def match_rows(rows: list[dict], pattern: str) -> list[dict]:
     return [r for r in rows if pl in r.get("Name", "").lower()]
 
 
-def _col(row: dict, prefix: str) -> str | None:
+def _colKey(row: dict, prefix: str) -> str | None:
     """Return the first column key that starts with *prefix*."""
     return next((k for k in row if k.startswith(prefix)), None)
 
@@ -104,36 +96,34 @@ def aggregate(matched: list[dict]) -> dict:
     if not matched:
         return {m: None for m in METRICS}
 
-    time_col   = _col(matched[0], "Total Time")
-    avg_col    = _col(matched[0], "Avg")
-    med_col    = _col(matched[0], "Med")
-    min_col    = _col(matched[0], "Min")
-    max_col    = _col(matched[0], "Max")
-    std_col    = _col(matched[0], "StdDev")
+    time_col = _colKey(matched[0], "Total Time")
+    avg_col = _colKey(matched[0], "Avg")
+    med_col = _colKey(matched[0], "Med")
+    min_col = _colKey(matched[0], "Min")
+    max_col = _colKey(matched[0], "Max")
+    std_col = _colKey(matched[0], "StdDev")
 
     def f(row, col):
         return float(row[col]) if col and row.get(col) not in (None, "") else None
 
     total_time = sum(f(r, time_col) or 0 for r in matched)
-    instances  = sum(int(r["Instances"]) for r in matched)
-    time_pct   = sum(float(r["Time (%)"]) for r in matched)
+    instances = sum(int(r["Instances"]) for r in matched)
+    time_pct = sum(float(r["Time (%)"]) for r in matched)
 
-    dominant = max(matched, key=lambda r: f(r, time_col) or 0)
+    # dominant = sorted(matched, key=lambda r: f(r, time_col) or 0)[-1]
+    dominant = max(matched, key=lambda r: f(r, time_col) or 0) # pick biggest row first
     return {
-        "Time (%)":   round(time_pct, 4),
+        "Time (%)": round(time_pct, 4),
         "Total Time": total_time,
-        "Instances":  instances,
-        "Avg":        f(dominant, avg_col),
-        "Med":        f(dominant, med_col),
-        "Min":        f(dominant, min_col),
-        "Max":        f(dominant, max_col),
-        "StdDev":     f(dominant, std_col),
+        "Instances": instances,
+        "Avg": f(dominant, avg_col),
+        "Med": f(dominant, med_col),
+        "Min": f(dominant, min_col),
+        "Max": f(dominant, max_col),
+        "StdDev": f(dominant, std_col),
     }
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(
@@ -156,34 +146,35 @@ def main():
 
     results_dir: Path = args.results_dir
     if not results_dir.is_dir():
-        sys.exit(f"ERROR: {results_dir} is not a directory")
+        sys.exit(f"error: {results_dir} is not a directory")
 
     rep_files = sorted(results_dir.glob("*.nsys-rep"))
     if not rep_files:
-        sys.exit(f"ERROR: no .nsys-rep files found in {results_dir}")
+        sys.exit(f"error: no .nsys-rep files found in {results_dir}")
 
-    print(f"Found {len(rep_files)} .nsys-rep files", file=sys.stderr)
+    print(f"found {len(rep_files)} .nsys-rep files", file=sys.stderr)
 
-    # Sanitise pattern labels for column names
     def label(p: str) -> str:
         s = p.replace(" ", "_")
-        return s[:50] if len(s) > 50 else s
+        # max_label_len = 40
+        # max_label_len = 64
+        max_label_len = 50
+        return s[:max_label_len] if len(s) > max_label_len else s
 
     labels = [label(p) for p in args.kernels]
 
-    # Column order: file | kernel1__metric1 | kernel1__metric2 | ... | kernelN__metricM
     col_headers = [f"{lbl}__{m}" for lbl in labels for m in METRICS]
-    all_cols    = ["file"] + col_headers
+    all_cols = ["file"] + col_headers
 
     rows_out = []
 
     for rep_file in rep_files:
         print(f"  {rep_file.name} ...", file=sys.stderr, end=" ", flush=True)
         try:
-            raw       = run_kern_sum(args.nsys, rep_file, args.timeunit, args.force_export)
-            kern_rows = parse_kern_sum(raw)
+            raw = run_kern_sum(args.nsys, rep_file, args.timeunit, args.force_export)
+            kern_rows = parseKernSum(raw)
         except RuntimeError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
+            print(f"error: {e}", file=sys.stderr)
             continue
 
         row = {"file": rep_file.stem}
@@ -200,7 +191,7 @@ def main():
         print("done", file=sys.stderr)
 
     if not rows_out:
-        sys.exit("ERROR: no data collected")
+        sys.exit("error: no data collected")
 
     def write_csv(f):
         writer = csv.DictWriter(f, fieldnames=all_cols, extrasaction="ignore")
@@ -210,7 +201,7 @@ def main():
     if args.output:
         with open(args.output, "w", newline="") as f:
             write_csv(f)
-        print(f"\nWrote {len(rows_out)} rows → {args.output}", file=sys.stderr)
+        print(f"\nwrote {len(rows_out)} rows to {args.output}", file=sys.stderr) # keep output simple
     else:
         write_csv(sys.stdout)
 

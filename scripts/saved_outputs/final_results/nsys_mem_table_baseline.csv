@@ -1,0 +1,2 @@
+profile,Memset | Total Time (ns),Memset | Instances,Memset | Bandwidth (GB/s),HtoD | Total Time (ns),HtoD | Instances,HtoD | Bandwidth (GB/s),DtoH | Total Time (ns),DtoH | Instances,DtoH | Bandwidth (GB/s),DtoD | Total Time (ns),DtoD | Instances,DtoD | Bandwidth (GB/s),GPU | Utilization (%),GPU | Peak VRAM (MB)
+profile_gsplat,557841408.0,370274.0,271.4564521391714,21444026914.0,152224.0,16.9911436137083,3948756245.0,171246.0,4.806109340385482,7430647239.0,217422.0,324.3529269286578,78.72124514925002,

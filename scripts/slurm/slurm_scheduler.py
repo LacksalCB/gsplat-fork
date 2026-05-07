@@ -4,23 +4,24 @@ import subprocess
 import sys
 from datetime import datetime
 
-# All code will be RUN on Rivanna (/scratch directory) - DO NOT mess with this file path!!!
 project_dir = Path("/scratch/rhm4nj/gpu_arch/gsplat-fork")
-# project_dir = Path("/bigtemp/rhm4nj/gpu_arch/project/gsplat-fork")
 TEMPLATE_PATH = str(project_dir / "scripts/slurm/profile_gsplat_template_rivanna.slurm")
 
-mode = "zip"   # "grid" = cartesian product, "zip" = pair by index (all lists must be same length)
-prefix = "_QUICK_frustum_gid_postrefine_with_true_baseline"
+mode = "zip"
+# mode = "grid"
+prefix = "_QUICK_frustum_apr30_with_true_baseline"
+# MAX_JOBS = 4
+# MAX_JOBS = 12
 MAX_JOBS = 8
 
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 base_dir = project_dir / "scripts/slurm/outputs" / Path(timestamp + prefix)
 
-slurm_dir      = base_dir / "slurm_scripts"
-slurm_out_dir  = base_dir / "slurm_out"
-slurm_err_dir  = base_dir / "slurm_err"
-config_dir     = base_dir / "configs"
-results_dir    = base_dir / "results"
+slurm_dir = base_dir / "slurm_scripts"
+slurm_out_dir = base_dir / "slurm_out"
+slurm_err_dir = base_dir / "slurm_err"
+config_dir = base_dir / "configs"
+results_dir = base_dir / "results"
 
 slurm_dir.mkdir(parents=True, exist_ok=False)
 slurm_out_dir.mkdir(parents=True, exist_ok=False)
@@ -47,12 +48,10 @@ fixed_params = {
     "scenes": "data/rubble-colmap",
 }
 
-# Quick three-way comparison:
-# 1. true baseline: no cache, no prefetch, no culling
-# 2. patched control: lru cache, no prefetch, no culling
-# 3. patched culling: lru cache, no prefetch, culling after refine_stop_iter
 sweep_params = {
+    # "--vram-thresh-gb": [8.0, 8.0, 8.0],
     "--vram-thresh-gb": [10.0, 10.0, 10.0],
+    # "--cache-mode": ["none", "none", "lru"],
     "--cache-mode": ["none", "lru", "lru"],
     "--enable-prefetch": [False, False, False],
     "--enable-frustum-culling": [False, False, True],
@@ -60,7 +59,6 @@ sweep_params = {
 
 
 
-# --- Helpers ---
 profile_prefix = str(results_dir / "profile_gsplat")
 
 def _abbrev(key: str) -> str:
@@ -72,7 +70,7 @@ def make_profile_output(prefix: str, keys: list, combo: tuple) -> str:
     parts = [f"{_abbrev(k)}-{v}" for k, v in zip(keys, combo)]
     return "_".join([prefix] + parts)
 
-def _format_arg(key: str, value) -> str:
+def _formatArg(key: str, value) -> str:
     """
     Format a single --key/value pair for the shell command.
     Boolean flags:
@@ -83,7 +81,7 @@ def _format_arg(key: str, value) -> str:
         return key if value else "--no-" + key.lstrip("-")
     return f"{key} {value}"
 
-def build_job_params(fixed: dict, keys: list, combo: tuple) -> dict:
+def buildJobParams(fixed: dict, keys: list, combo: tuple) -> dict:
     """
     Build the job_params dict for one combination.
     """
@@ -96,17 +94,16 @@ def build_job_params(fixed: dict, keys: list, combo: tuple) -> dict:
     args_parts = []
     for k, v in fixed.items():
         if str(k).startswith("--"):
-            args_parts.append(_format_arg(k, v))
+            args_parts.append(_formatArg(k, v))
 
     for k, v in zip(keys, combo):
         if str(k).startswith("--"):
-            args_parts.append(_format_arg(k, v))
+            args_parts.append(_formatArg(k, v))
 
     params["args"] = " ".join(args_parts)
     return params
 
-# --- Build combinations ---
-keys   = list(sweep_params.keys())
+keys = list(sweep_params.keys())
 values = list(sweep_params.values())
 
 if mode == "grid":
@@ -115,12 +112,11 @@ elif mode == "zip":
     lengths = [len(v) for v in values]
     if len(set(lengths)) != 1:
         raise ValueError("zip mode: all sweep param lists must have the same length")
+    # combinations = list(itertools.product(*values))
     combinations = list(zip(*values))
 else:
     raise ValueError("mode must be 'grid' or 'zip'")
 
-# Keep only meaningful cache/prefetch/cache-size combinations so experiment count
-# stays focused and bounded.
 if mode == "grid":
     key_to_idx = {k: i for i, k in enumerate(keys)}
     cm_idx = key_to_idx.get("--cache-mode")
@@ -135,14 +131,12 @@ if mode == "grid":
             prefetch = combo[pf_idx]
             vram_thresh = combo[vt_idx] if vt_idx is not None else None
 
-            # With no cache, prefetch is a no-op and cache size is irrelevant.
             if cache_mode == "none":
                 if prefetch:
                     continue
                 if vt_idx is not None and vram_thresh != control_vram:
                     continue
 
-            # warm_all pre-populates cache; async prefetch is redundant there.
             if cache_mode == "warm_all" and prefetch:
                 continue
 
@@ -156,13 +150,13 @@ if total_jobs > MAX_JOBS:
         "Narrow sweep_params or tighten non-redundant filtering."
     )
 print(f"\ntotal jobs to generate: {total_jobs}")
-print("\nJobs:")
+print("\njobs:")
 
 for combo in combinations:
-    p = build_job_params(fixed_params, keys, combo)
+    p = buildJobParams(fixed_params, keys, combo)
     p["profile_output"] = make_profile_output(profile_prefix, keys, combo)
     print(f"  {p['profile_output']}")
-    print(f"    args: {p['args']}")
+    print(f"    args: {p['args']}") # quick check before lanch
 
 folders = [Path(slurm_dir), Path(config_dir)]
 for folder in folders:
@@ -179,7 +173,7 @@ if "gpu_type" not in sweep_params and "gpu_type" not in fixed_params:
     template = template.replace(r'#SBATCH --constraint="{gpu_type}"', "")
 
 for idx, combo in enumerate(combinations):
-    job_params = build_job_params(fixed_params, keys, combo)
+    job_params = buildJobParams(fixed_params, keys, combo)
     job_params["profile_output"] = make_profile_output(profile_prefix, keys, combo)
 
     filled = template.format(**job_params)
@@ -195,7 +189,8 @@ for idx, combo in enumerate(combinations):
     print(f"    args: {job_params['args']}")
 
     if do_run:
+        # result = subprocess.run(["sbatch", str(job_file), "--test-only"])
         result = subprocess.run(["sbatch", str(job_file)])
-        print("  Submitted:", str(job_file))
+        print("  submitted:", str(job_file)) # avoid fancy text
 
-print("\nAll jobs generated successfully.")
+print("\nall jobs generated successfully.")
