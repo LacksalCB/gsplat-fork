@@ -1,5 +1,5 @@
 scripts/slurm/outputs/*
-examples/data/360_v2/*
+examples/data/*
 examples/results/*
 **/__pycache__/*
 
@@ -28,3 +28,18 @@ cuda_12.1.0_530.30.02_linux.run
 */.nfs00000000024ff9e20000019a
 gsplat/csrc.so
 
+# local/editor clutter
+*.swp
+.DS_Store
+
+# large storage-heavy artifacts
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+*.bin
+*.npy
+*.npz
+*.pth

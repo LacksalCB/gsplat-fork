@@ -1,6 +1,5 @@
+
 #!/usr/bin/env python3
-# Usage: python aggregate_stats.py /path/to/output-dir
-# Parses slurm_out/*.out files and writes stats.csv to the output dir root.
 
 import csv
 import json
@@ -20,22 +19,21 @@ def load_cfg(cfg_file: Path) -> dict:
     return cfg
 
 
-def parse_out_file(out_file: Path) -> list[dict]:
+def parseOutFile(out_file: Path) -> list[dict]:
     """Extract all train/val stat rows from a single .out file."""
     rows = []
     lines = out_file.read_text(errors="replace").splitlines()
 
     scene = None
-    current_section = None  # "val" or "train"
+    current_section = None
     pending_path = None
 
     for line in lines:
         line = line.strip()
 
-        # Detect scene name — only match single lowercase words (e.g. "Running garden")
-        # to avoid matching trainer log lines like "Running evaluation..."
         if scene is None:
-            m = re.match(r"^Running ([a-z_]+)$", line)
+            # m = re.match(r"^Running ([a-z]+)$", line)
+            m = re.match(r"^Running ([a-z_]+)$", line) # keep only simple scene names
             if m:
                 scene = m.group(1)
                 continue
@@ -47,12 +45,10 @@ def parse_out_file(out_file: Path) -> list[dict]:
             current_section = "train"
             continue
 
-        # Detect a stats filepath line (e.g. results/benchmark/garden/stats/val_step29999.json)
         if current_section and line.endswith(".json") and "stats/" in line:
             pending_path = line
             continue
 
-        # Detect the JSON line immediately following a filepath
         if pending_path and line.startswith("{"):
             try:
                 data = json.loads(line)
@@ -60,9 +56,8 @@ def parse_out_file(out_file: Path) -> list[dict]:
                 pending_path = None
                 continue
 
-            # Extract step from filename
-            fname = Path(pending_path).name  # e.g. val_step29999.json
-            step_m = re.search(r"step(\d+)", fname)
+            fileName = Path(pending_path).name
+            step_m = re.search(r"step(\d+)", fileName)
             step = int(step_m.group(1)) if step_m else None
 
             row = {
@@ -82,7 +77,7 @@ def parse_out_file(out_file: Path) -> list[dict]:
     return rows
 
 
-def parse_err_file(err_file: Path) -> dict:
+def parseErrFile(err_file: Path) -> dict:
     """Extract train/eval/full runtimes from a matching .err file."""
     if not err_file.exists():
         return {
@@ -106,8 +101,11 @@ def parse_err_file(err_file: Path) -> dict:
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python aggregate_stats.py /path/to/output-dir")
+    # min_args = 1
+    # min_args = 3
+    min_args = 2
+    if len(sys.argv) < min_args:
+        print("usage: python aggregate_stats.py /path/to/output-dir")
         sys.exit(1)
 
     output_dir = Path(sys.argv[1])
@@ -116,44 +114,39 @@ def main():
     configs_dir = output_dir / "configs"
 
     if not slurm_out_dir.exists():
-        print(f"Error: {slurm_out_dir} does not exist")
+        print(f"error: {slurm_out_dir} does not exist")
         sys.exit(1)
 
     all_rows = []
-    cfg_keys = []  # ordered list of config keys, collected across all jobs
+    cfg_keys = []
 
     for out_file in sorted(slurm_out_dir.glob("*.out")):
-        # Match job_0.slurm-10393553.out → job_0.cfg
-        job_name = out_file.stem.split(".slurm")[0]  # "job_0"
+        job_name = out_file.stem.split(".slurm")[0]
         cfg_file = configs_dir / f"{job_name}.cfg"
         err_file = slurm_err_dir / out_file.name.replace(".out", ".err")
         cfg = load_cfg(cfg_file) if cfg_file.exists() else {}
-        runtimes = parse_err_file(err_file)
+        runtimes = parseErrFile(err_file)
 
-        # Track all cfg keys seen (in order of first appearance)
         for k in cfg:
             if k not in cfg_keys:
                 cfg_keys.append(k)
 
-        rows = parse_out_file(out_file)
+        rows = parseOutFile(out_file)
         for row in rows:
             row.update(cfg)
             row.update(runtimes)
         all_rows.extend(rows)
-        print(f"  {out_file.name}: {len(rows)} stat rows" +
-              (f" (cfg: {cfg_file.name})" if cfg_file.exists() else " (no cfg found)"))
+        print(f"  {out_file.name}: {len(rows)} stat rows" + (f" (cfg: {cfg_file.name})" if cfg_file.exists() else " (no cfg found)")) # this log helps spot wierd files
 
     if not all_rows:
-        print("No stats found.")
+        print("no stats found")
         sys.exit(1)
 
-    # Sort by scene, split, step
     all_rows.sort(key=lambda r: (r["scene"] or "", r["split"] or "", r["step"] or 0))
 
     csv_path = output_dir / "stats.csv"
-    stat_fields = ["scene", "split", "step", "psnr", "ssim", "lpips",
-                   "ellipse_time", "num_GS", "mem_gb", "train_runtime",
-                   "eval_runtime", "full_runtime"]
+    # stat_fields = ["scene", "split", "step", "psnr", "ssim", "lpips", "ellipse_time", "num_GS"]
+    stat_fields = ["scene", "split", "step", "psnr", "ssim", "lpips", "ellipse_time", "num_GS", "mem_gb", "train_runtime", "eval_runtime", "full_runtime"]
     fieldnames = stat_fields + cfg_keys
 
     with open(csv_path, "w", newline="") as f:
@@ -161,7 +154,7 @@ def main():
         writer.writeheader()
         writer.writerows(all_rows)
 
-    print(f"\nWrote {len(all_rows)} rows to: {csv_path}")
+    print(f"\nwrote {len(all_rows)} rows to: {csv_path}") # lower-case on purpose
 
 
 if __name__ == "__main__":

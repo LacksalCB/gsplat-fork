@@ -1,112 +1,157 @@
-# GSPLAT Update for CS 6501: GPU Architectures (Christian Benjamin and Raffi Khondaker)
+# GPU-Arch 3DGS Experiments (`gsplat-fork`)
 
-Our primary objective is to address the runtime and VRAM usage bottlenecks of this 3DGS implementations.  The primary issues of gsplat and the inria implementations is that they can easily use 10s of Gigabytes of memory and takes 40+ minutes to execute.  Via a software managed cache and improved pipeline architecture, we plan to cut runtime significantly and reduce peak VRAM usage while maintaining acceptable output image quality scores.
+This repo is a course/project fork focused on improving `trainer_refactored.py` runtime and VRAM behavior for Gaussian Splatting experiments (cache policy, prefetch, frustum culling, and optimizer stride sweeps), with SLURM + Nsight Systems profiling support.
 
-## Current Work
+## What matters in this repo
 
-- Implemented basic cache + LRU which reduced runtime by 15% and HtoD bandwidth from ~300GB/s to 120GB/s. 
-- Implemented frustum culling which reduced runtime by an additional 30% and Reduced HtoD and DtoD by ~100% and ~25% respectively
-- Added ADAM optimizizer stride accumulation which reduces runtime (in most cases) linearly with stride size with a minimal PSNR reduction
+- Main trainer: `examples/trainer_refactored.py`
+- Benchmark entrypoint used by SLURM: `examples/benchmarks/custom_rubble.sh`
+- SLURM job generator: `scripts/slurm/slurm_scheduler.py`
+- Job template: `scripts/slurm/profile_gsplat_template_rivanna.slurm`
+- Stats aggregation: `scripts/slurm/aggregate_model_stats.py`
+- Nsight export helper: `scripts/slurm/nsys_export_sqlite.sh`
+- Nsight table builder: `scripts/slurm/nsys_kernel_table.py`
 
+## Environment setup
 
-# [DEPRECATED FROM FORK]: gsplat
-
-[![Core Tests.](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml)
-[![Docs](https://github.com/nerfstudio-project/gsplat/actions/workflows/doc.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/doc.yml)
-
-[http://www.gsplat.studio/](http://www.gsplat.studio/)
-
-gsplat is an open-source library for CUDA accelerated rasterization of gaussians with python bindings. It is inspired by the SIGGRAPH paper [3D Gaussian Splatting for Real-Time Rendering of Radiance Fields](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/), but we’ve made gsplat even faster, more memory efficient, and with a growing list of new features! 
-
-<div align="center">
-  <video src="https://github.com/nerfstudio-project/gsplat/assets/10151885/64c2e9ca-a9a6-4c7e-8d6f-47eeacd15159" width="100%" />
-</div>
-
-## News
-
-[Jan 2026] [PPIPS](https://research.nvidia.com/labs/sil/projects/ppisp/) is integreated as an alternative way of bilateral grid to compensate the training views.
-
-[May 2025] Arbitrary batching (over multiple scenes and multiple viewpoints) is supported now!! Checkout [here](docs/batch.md) for more details! Kudos to [Junchen Liu](https://junchenliu77.github.io/).
-
-[May 2025] [Jonathan Stephens](https://x.com/jonstephens85) makes a great [tutorial video](https://www.youtube.com/watch?v=ACPTiP98Pf8) for Windows users on how to install gsplat and get start with 3DGUT.
-
-[April 2025] [NVIDIA 3DGUT](https://research.nvidia.com/labs/toronto-ai/3DGUT/) is now integrated in gsplat! Checkout [here](docs/3dgut.md) for more details. [[NVIDIA Tech Blog]](https://developer.nvidia.com/blog/revolutionizing-neural-reconstruction-and-rendering-in-gsplat-with-3dgut/) [[NVIDIA Sweepstakes]](https://www.nvidia.com/en-us/research/3dgut-sweepstakes/)
-
-## Installation
-
-**Dependence**: Please install [Pytorch](https://pytorch.org/get-started/locally/) first.
-
-The easiest way is to install from PyPI. In this way it will build the CUDA code **on the first run** (JIT).
+1. Install PyTorch first (CUDA build that matches your system).
+2. From repo root:
 
 ```bash
-pip install gsplat
+pip install -e .
+pip install -r examples/requirements.txt --no-build-isolation
 ```
 
-Alternatively you can install gsplat from source. In this way it will build the CUDA code during installation.
+## Data setup
 
-```bash
-pip install git+https://github.com/nerfstudio-project/gsplat.git
-```
+The trainer expects COLMAP-style scene folders.
 
-We also provide [pre-compiled wheels](https://docs.gsplat.studio/whl) for both linux and windows on certain python-torch-CUDA combinations (please check first which versions are supported). Note this way you would have to manually install [gsplat's dependencies](https://github.com/nerfstudio-project/gsplat/blob/6022cf45a19ee307803aaf1f19d407befad2a033/setup.py#L115). For example, to install gsplat for pytorch 2.0 and cuda 11.8 you can run
-```
-pip install ninja numpy jaxtyping rich
-pip install gsplat --index-url https://docs.gsplat.studio/whl/pt20cu118
-```
-
-To build gsplat from source on Windows, please check [this instruction](docs/INSTALL_WIN.md).
-
-## Evaluation
-
-This repo comes with a standalone script that reproduces the official Gaussian Splatting with exactly the same performance on PSNR, SSIM, LPIPS, and converged number of Gaussians. Powered by gsplat’s efficient CUDA implementation, the training takes up to **4x less GPU memory** with up to **15% less time** to finish than the official implementation. Full report can be found [here](https://docs.gsplat.studio/main/tests/eval.html).
+### Option A: Download MipNeRF360 benchmark scenes
 
 ```bash
 cd examples
-pip install -r requirements.txt --no-build-isolation
-# download mipnerf_360 benchmark data
-python datasets/download_dataset.py
-# run batch evaluation
-bash benchmarks/basic.sh
+python datasets/download_dataset.py --dataset mipnerf360 --save_dir data
 ```
 
-## Examples
+This creates scenes under `examples/data/360_v2/...`.
 
-We provide a set of examples to get you started! Below you can find the details about
-the examples (requires to install some exta dependencies via `pip install -r examples/requirements.txt`)
+### Option B: Use your custom rubble dataset
 
-- [Train a 3D Gaussian splatting model on a COLMAP capture.](https://docs.gsplat.studio/main/examples/colmap.html)
-- [Fit a 2D image with 3D Gaussians.](https://docs.gsplat.studio/main/examples/image.html)
-- [Render a large scene in real-time.](https://docs.gsplat.studio/main/examples/large_scale.html)
+Place your scene at `examples/data/rubble-colmap/` with at least:
 
+- `images/`
+- `sparse/0/` (or `sparse/`)
 
-## Development and Contribution
+`trainer_refactored.py`/`custom_rubble.sh` are already wired for `data/rubble-colmap`.
 
-This repository was born from the curiosity of people on the Nerfstudio team trying to understand a new rendering technique. We welcome contributions of any kind and are open to feedback, bug-reports, and improvements to help expand the capabilities of this software.
+## Quick local run (no SLURM)
 
-This project is developed by the following wonderful contributors (unordered):
-
-- [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/) (UC Berkeley): Mentor of the project.
-- [Matthew Tancik](https://www.matthewtancik.com/about-me) (Luma AI): Mentor of the project.
-- [Vickie Ye](https://people.eecs.berkeley.edu/~vye/) (UC Berkeley): Project lead. v0.1 lead.
-- [Matias Turkulainen](https://maturk.github.io/) (Aalto University): Core developer.
-- [Ruilong Li](https://www.liruilong.cn/) (UC Berkeley): Core developer. v1.0 lead.
-- [Justin Kerr](https://kerrj.github.io/) (UC Berkeley): Core developer.
-- [Brent Yi](https://github.com/brentyi) (UC Berkeley): Core developer.
-- [Zhuoyang Pan](https://panzhy.com/) (ShanghaiTech University): Core developer.
-- [Jianbo Ye](http://www.jianboye.org/) (Amazon): Core developer.
-
-We also have a white paper with about the project with benchmarking and mathematical supplement with conventions and derivations, available [here](https://arxiv.org/abs/2409.06765). If you find this library useful in your projects or papers, please consider citing:
-
-```
-@article{ye2025gsplat,
-  title={gsplat: An open-source library for Gaussian splatting},
-  author={Ye, Vickie and Li, Ruilong and Kerr, Justin and Turkulainen, Matias and Yi, Brent and Pan, Zhuoyang and Seiskari, Otto and Ye, Jianbo and Hu, Jeffrey and Tancik, Matthew and Angjoo Kanazawa},
-  journal={Journal of Machine Learning Research},
-  volume={26},
-  number={34},
-  pages={1--17},
-  year={2025}
-}
+```bash
+cd examples
+CUDA_VISIBLE_DEVICES=0 python -u trainer_refactored.py default \
+  --disable_viewer \
+  --data_dir data/rubble-colmap \
+  --result_dir results/rubble_local \
+  --cache_mode lru \
+  --enable_frustum_culling \
+  --optimizer_stride 1
 ```
 
-We welcome contributions of any kind and are open to feedback, bug-reports, and improvements to help expand the capabilities of this software. Please check [docs/DEV.md](docs/DEV.md) for more info about development.
+## Running SLURM experiments
+
+1. Edit sweep and fixed settings in `scripts/slurm/slurm_scheduler.py`:
+   `fixed_params` (scene path, GPU/mem/time, script path), `sweep_params` (ablations), and `mode` (`zip` or `grid`).
+2. Submit jobs:
+
+```bash
+cd scripts/slurm
+python slurm_scheduler.py
+```
+
+3. Outputs are created in a timestamped folder under:
+
+`scripts/slurm/outputs/<timestamp>_<prefix>/`
+
+You’ll get:
+- `slurm_scripts/`
+- `slurm_out/`
+- `slurm_err/`
+- `configs/`
+- `results/` (`.nsys-rep`, `.sqlite`, trainer outputs)
+
+4. Aggregate trainer stats:
+
+```bash
+python aggregate_model_stats.py outputs/<timestamp>_<prefix>
+```
+
+This writes `stats.csv` in that output root.
+
+## Nsight profiling post-processing
+
+If `.sqlite` files are not already exported:
+
+```bash
+cd scripts/slurm
+./nsys_export_sqlite.sh outputs/<timestamp>_<prefix>/results
+```
+
+Then build memory/utilization summary tables:
+
+```bash
+python nsys_kernel_table.py outputs/<timestamp>_<prefix>/results --output nsys_mem_table.csv
+```
+
+## Key `trainer_refactored.py` args
+
+### Data/output
+
+- `--data_dir`: scene path (`data/rubble-colmap`, `data/360_v2/garden`, ...)
+- `--data_factor`: image downsample factor
+- `--result_dir`: output root for ckpts/stats/renders/videos
+- `--test_every`: train/val split cadence
+
+### Schedule/checkpoints
+
+- `--steps_scaler`: scales many step-based schedules together
+- `--max_steps`: total training steps
+- `--eval_steps`: evaluation checkpoints
+- `--save_steps`: checkpoint save steps
+- `--ply_steps`: ply export steps (if enabled)
+
+### Runtime/VRAM tuning (main experiment knobs)
+
+- `--optimizer_stride`: gradient accumulation stride before optimizer step
+- `--cache_mode`: `none | lru | lfu | twoq | warm_all`
+- `--enable_prefetch`: async GPU prefetch for upcoming batches
+- `--prefetch_lookahead`: prefetch queue lookahead depth
+- `--vram_thresh_gb`: GPU cache budget
+- `--twoq_a1_ratio`: A1 queue fraction in 2Q mode
+- `--enable_input_cache`: legacy toggle (enables cache when `cache_mode=none`)
+- `--enable_frustum_culling`: pre-raster cull mask
+- `--frustum_cull_interval`: how often masks are recomputed
+- `--frustum_cull_radius_scale`, `--frustum_cull_margin_*`: culling aggressiveness
+
+### Quality/feature toggles
+
+- `--ssim_lambda`: L1 vs SSIM loss mix
+- `--depth_loss`, `--depth_lambda`: depth supervision
+- `--pose_opt`, `--app_opt`: camera/appearance optimization
+- `--post_processing`: `bilateral_grid` or `ppisp` (single GPU only)
+
+### Eval/render path
+
+- `--ckpt`: eval-only mode on saved checkpoint(s)
+- `--render_traj_path`: `interp | ellipse | spiral`
+- `--disable_video`: skip trajectory video generation
+
+## Important notes
+
+- `custom_rubble.sh` runs train, then eval/render on produced checkpoints.
+- `profile_gsplat_template_rivanna.slurm` assumes a Rivanna-style module workflow and an existing venv at `/scratch/rhm4nj/gpu_arch/envs/<gpu_type>-env`.
+- If you move this repo, update absolute paths in `scripts/slurm/slurm_scheduler.py` and possibly the SLURM template.
+- Default config preset is `default`; `mcmc` is also available via:
+
+```bash
+python trainer_refactored.py mcmc ...
+```

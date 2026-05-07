@@ -1,15 +1,15 @@
 import json
 import math
 import os
+from itertools import islice
 
-# handle cache eviction clearing
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256"
 
 import time
-from collections import defaultdict, OrderedDict
+from collections import defaultdict, OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import imageio
 import numpy as np
@@ -48,219 +48,331 @@ import torch.cuda.profiler as profiler
 import torch.cuda.nvtx as nvtx
 
 
-# Raw image software cacher with LRU eviction 
-# Impractical to use scratchpad due to data size and access pattern,
-# So it's a simple VRAM glob-mem OrderedDict()
-class GSCacheManager:
-    # Adjust threshold to limit how much VRAM cache can take up
-    def __init__(self, vram_thresh_gb=18.5):
-        self.limit_bytes = int(vram_thresh_gb * (1024 ** 3)) #input GB to bytes conversion
-        self.cache = OrderedDict()
-        self.entry_sizes = {}   
+class BaseGPUCacheManager:
+    def __init__(self, vram_thresh_gb: float = 18.5):
+        self.limit_bytes = int(vram_thresh_gb * (1024 ** 3))
+        self.cache: Dict[int, Dict[str, Optional[torch.Tensor]]] = {}
+        self.entry_sizes: Dict[int, int] = {}
         self.current_bytes = 0
         self.transfer_stream = torch.cuda.Stream()
- 
-    def _entry_bytes(self, entry):
+
+    def _entry_bytes(self, entry: Dict[str, Optional[torch.Tensor]]) -> int:
         return sum(
             v.element_size() * v.numel()
             for v in entry.values()
             if isinstance(v, torch.Tensor)
         )
 
-    def get_cache(self, view_id, compute_func):
-        # Hit: Update LRU
+    def _on_hit(self, view_id: int):
+        return None
+
+    def _on_insert(self, view_id: int):
+        return None
+
+    def _on_remove(self, view_id: int, entry_size: int):
+        return None
+
+    def _select_evict_id(self) -> int:
+        raise NotImplementedError
+
+    def _reset_policy_state(self):
+        return None
+
+    def _remove(self, view_id: int):
+        if view_id not in self.cache:
+            return
+        entry_size = self.entry_sizes.pop(view_id)
+        self.current_bytes -= entry_size
+        self.cache.pop(view_id)
+        self._on_remove(view_id, entry_size)
+
+    def _store(self, view_id: int, entry: Dict[str, Optional[torch.Tensor]]):
+        entry_bytes = self._entry_bytes(entry)
+        if entry_bytes > self.limit_bytes:
+            return
         if view_id in self.cache:
-            self.cache.move_to_end(view_id)
-            entry = self.cache[view_id]
-            with torch.cuda.stream(self.transfer_stream):
-                for k, v in entry.items():
-                    if isinstance(v, torch.Tensor):
-                        entry[k] = v.to("cuda", non_blocking=True)
-            return entry
-
-        # Miss: compute new entry
-        new_entry = compute_func()
-        entry_bytes = self._entry_bytes(new_entry)
-
-        # Eviction Policy
+            self._remove(view_id)
         while self.current_bytes + entry_bytes > self.limit_bytes and self.cache:
-            lru_id, _ = self.cache.popitem(last=False)
-            self.current_bytes -= self.entry_sizes.pop(lru_id)
-
-        self.cache[view_id] = new_entry
+            self._remove(self._select_evict_id())
+        if self.current_bytes + entry_bytes > self.limit_bytes:
+            return
+        self.cache[view_id] = entry
         self.entry_sizes[view_id] = entry_bytes
         self.current_bytes += entry_bytes
+        self._on_insert(view_id)
+
+    def get_cache(
+        self, view_id: int, compute_func: Callable[[], Dict[str, Optional[torch.Tensor]]]
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        if view_id in self.cache:
+            self._on_hit(view_id)
+            return self.cache[view_id]
+        new_entry = compute_func()
+        self._store(view_id, new_entry)
         return new_entry
+
+    def has_view(self, view_id: int) -> bool:
+        return view_id in self.cache
+
+    def can_prefetch(self, high_watermark: float = 0.9) -> bool:
+        watermark = max(0.0, min(1.0, high_watermark))
+        return self.current_bytes < int(self.limit_bytes * watermark) # stop before cache flaps
+
+    def prefetch(
+        self, view_id: int, compute_func: Callable[[], Dict[str, Optional[torch.Tensor]]]
+    ) -> bool:
+        if not self.can_prefetch():
+            return False
+        if view_id in self.cache:
+            return False
+        with torch.cuda.stream(self.transfer_stream):
+            new_entry = compute_func()
+        old_bytes = self.current_bytes
+        self._store(view_id, new_entry)
+        return (view_id in self.cache) and (self.current_bytes >= old_bytes)
 
     def purge_all(self):
         self.cache.clear()
         self.entry_sizes.clear()
         self.current_bytes = 0
+        self._reset_policy_state()
         torch.cuda.empty_cache()
+
+
+class GPULRUCacheManager(BaseGPUCacheManager):
+    def __init__(self, vram_thresh_gb: float = 18.5):
+        super().__init__(vram_thresh_gb=vram_thresh_gb)
+        self.lru = OrderedDict()
+
+    def _on_hit(self, view_id: int):
+        self.lru.move_to_end(view_id)
+
+    def _on_insert(self, view_id: int):
+        self.lru[view_id] = None
+
+    def _on_remove(self, view_id: int, entry_size: int):
+        self.lru.pop(view_id, None)
+
+    def _select_evict_id(self) -> int:
+        return next(iter(self.lru))
+
+    def _reset_policy_state(self):
+        self.lru.clear()
+
+
+class GPULFUCacheManager(BaseGPUCacheManager):
+    def __init__(self, vram_thresh_gb: float = 18.5):
+        super().__init__(vram_thresh_gb=vram_thresh_gb)
+        self.freq: Dict[int, int] = {}
+        self.last_touch: Dict[int, int] = {}
+        self.touch_tick = 0
+
+    def _mark_touched(self, view_id: int, bump_freq: bool):
+        self.touch_tick += 1
+        self.last_touch[view_id] = self.touch_tick
+        if bump_freq:
+            self.freq[view_id] = self.freq.get(view_id, 0) + 1
+
+    def _on_hit(self, view_id: int):
+        self._mark_touched(view_id, bump_freq=True)
+
+    def _on_insert(self, view_id: int):
+        self.freq[view_id] = 1
+        self._mark_touched(view_id, bump_freq=False)
+
+    def _on_remove(self, view_id: int, entry_size: int):
+        self.freq.pop(view_id, None)
+        self.last_touch.pop(view_id, None)
+
+    def _select_evict_id(self) -> int:
+        return min(
+            self.cache.keys(),
+            key=lambda vid: (self.freq.get(vid, 0), self.last_touch.get(vid, 0)),
+        )
+
+    def _reset_policy_state(self):
+        self.freq.clear()
+        self.last_touch.clear()
+        self.touch_tick = 0
+
+
+class GPUTwoQCacheManager(BaseGPUCacheManager):
+    def __init__(self, vram_thresh_gb: float = 18.5, a1_fraction: float = 0.25):
+        super().__init__(vram_thresh_gb=vram_thresh_gb)
+        self.a1_fraction = max(0.05, min(0.9, a1_fraction))
+        self.a1_queue = OrderedDict()
+        self.am_lru = OrderedDict()
+        self.tier: Dict[int, str] = {}
+        self.a1_bytes = 0
+        self.am_bytes = 0
+
+    def _on_hit(self, view_id: int):
+        tier = self.tier.get(view_id)
+        if tier == "a1":
+            self.a1_queue.pop(view_id, None)
+            self.am_lru[view_id] = None
+            self.tier[view_id] = "am"
+            size = self.entry_sizes.get(view_id, 0)
+            self.a1_bytes -= size
+            self.am_bytes += size
+        elif tier == "am":
+            self.am_lru.move_to_end(view_id)
+
+    def _on_insert(self, view_id: int):
+        self.a1_queue[view_id] = None
+        self.tier[view_id] = "a1"
+        self.a1_bytes += self.entry_sizes.get(view_id, 0)
+
+    def _on_remove(self, view_id: int, entry_size: int):
+        tier = self.tier.pop(view_id, None)
+        if tier == "a1":
+            self.a1_queue.pop(view_id, None)
+            self.a1_bytes -= entry_size
+        elif tier == "am":
+            self.am_lru.pop(view_id, None)
+            self.am_bytes -= entry_size
+
+    def _select_evict_id(self) -> int:
+        a1_budget = int(self.limit_bytes * self.a1_fraction)
+        if self.a1_queue and (self.a1_bytes > a1_budget or not self.am_lru):
+            return next(iter(self.a1_queue))
+        if self.am_lru:
+            return next(iter(self.am_lru))
+        return next(iter(self.a1_queue))
+
+    def _reset_policy_state(self):
+        self.a1_queue.clear()
+        self.am_lru.clear()
+        self.tier.clear()
+        self.a1_bytes = 0
+        self.am_bytes = 0
+
+
+class GSCacheManager(GPULRUCacheManager):
+    pass
+
+
+def createGpuCacheManager(
+    cache_mode: str, vram_thresh_gb: float, twoq_a1_ratio: float
+) -> BaseGPUCacheManager:
+    if cache_mode in ("lru", "warm_all"):
+        return GPULRUCacheManager(vram_thresh_gb=vram_thresh_gb)
+    if cache_mode == "lfu":
+        return GPULFUCacheManager(vram_thresh_gb=vram_thresh_gb)
+    if cache_mode == "twoq":
+        return GPUTwoQCacheManager(
+            vram_thresh_gb=vram_thresh_gb, a1_fraction=twoq_a1_ratio
+        )
+    raise ValueError(f"Unsupported cache mode: {cache_mode}")
 
 @dataclass
 class Config:
-    # Disable viewer
     disable_viewer: bool = False
-    # Path to the .pt files. If provide, it will skip training and run evaluation only.
     ckpt: Optional[List[str]] = None
-    # Name of compression strategy to use
     compression: Optional[Literal["png"]] = None
-    # Render trajectory path
     render_traj_path: str = "interp"
 
-    # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
-    # Downsample factor for the dataset
     data_factor: int = 4
-    # Directory to save results
     result_dir: str = "results/garden"
-    # Every N images there is a test image
     test_every: int = 8
-    # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
-    # A global scaler that applies to the scene size related parameters
     global_scale: float = 1.0
-    # Normalize the world space
     normalize_world_space: bool = True
-    # Camera model
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
-    # Load EXIF exposure metadata from images (if available)
     load_exposure: bool = True
 
-    # Port for the viewer server
     port: int = 8080
 
-    # Batch size for training. Learning rates are scaled automatically
+    # batch_size: int = 2
     batch_size: int = 1
-    # A global factor to scale the number of training steps
     steps_scaler: float = 1.0
 
-    # Number of training steps
+    # max_steps: int = 20_000
+    # max_steps: int = 40_000
     max_steps: int = 30_000
-    # Steps to evaluate the model
     eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
-    # Steps to save the model
     save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
-    # Whether to save ply file (storage size can be large)
     save_ply: bool = False
-    # Steps to save the model as ply
     ply_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
-    # Whether to disable video generation during training and evaluation
     disable_video: bool = False
 
-    # Initialization strategy
     init_type: str = "sfm"
-    # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
-    # Initial extent of GSs as a multiple of the camera extent. Ignored if using sfm
     init_extent: float = 3.0
-    # Degree of spherical harmonics
     sh_degree: int = 3
-    # Turn on another SH degree every this steps
     sh_degree_interval: int = 1000
-    # Initial opacity of GS
     init_opa: float = 0.1
-    # Initial scale of GS
     init_scale: float = 1.0
-    # Weight for SSIM loss
     ssim_lambda: float = 0.2
 
-    # Near plane clipping distance
     near_plane: float = 0.01
-    # Far plane clipping distance
     far_plane: float = 1e10
 
-    # Strategy for GS densification
     strategy: Union[DefaultStrategy, MCMCStrategy] = field(
         default_factory=DefaultStrategy
     )
-    # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
     packed: bool = False
-    # Use sparse gradients for optimization. (experimental)
     sparse_grad: bool = False
-    # Use visible adam from Taming 3DGS. (experimental)
     visible_adam: bool = False
-    # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
     antialiased: bool = False
 
-    # Use random background for training to discourage transparency
     random_bkgd: bool = False
 
-    # Ablation flags
-    # Number of steps to accumulate gradients before optimizer step (1 = every step, i.e. no accumulation)
+    # optimizer_stride: int = 2
     optimizer_stride: int = 4
-    # Enable pre-rasterization frustum culling
     enable_frustum_culling: bool = False
-    # Enable LRU input cache to skip repeated CPU->GPU transfers
+    frustum_cull_radius_scale: float = 1.5
+    frustum_cull_margin_early: float = 0.0
+    frustum_cull_margin_late: float = 0.0
+    frustum_cull_margin_switch_step: int = 10_000
+    frustum_cull_interval: int = 10
+    cache_mode: Literal["none", "lru", "lfu", "twoq", "warm_all"] = "none"
     enable_input_cache: bool = False
+    enable_prefetch: bool = False
+    # prefetch_lookahead: int = 2
+    prefetch_lookahead: int = 1
+    twoq_a1_ratio: float = 0.25
+    # vram_thresh_gb: float = 16.0
+    vram_thresh_gb: float = 18.5
 
-    # LR for 3D point positions
     means_lr: float = 1.6e-4
-    # LR for Gaussian scale factors
     scales_lr: float = 5e-3
-    # LR for alpha blending weights
     opacities_lr: float = 5e-2
-    # LR for orientation (quaternions)
     quats_lr: float = 1e-3
-    # LR for SH band 0 (brightness)
     sh0_lr: float = 2.5e-3
-    # LR for higher-order SH (detail)
     shN_lr: float = 2.5e-3 / 20
 
-    # Opacity regularization
     opacity_reg: float = 0.0
-    # Scale regularization
     scale_reg: float = 0.0
 
-    # Enable camera optimization.
     pose_opt: bool = False
-    # Learning rate for camera optimization
     pose_opt_lr: float = 1e-5
-    # Regularization for camera optimization as weight decay
     pose_opt_reg: float = 1e-6
-    # Add noise to camera extrinsics. This is only to test the camera pose optimization.
     pose_noise: float = 0.0
 
-    # Enable appearance optimization. (experimental)
     app_opt: bool = False
-    # Appearance embedding dimension
     app_embed_dim: int = 16
-    # Learning rate for appearance optimization
     app_opt_lr: float = 1e-3
-    # Regularization for appearance optimization as weight decay
     app_opt_reg: float = 1e-6
 
-    # Post-processing method for appearance correction (experimental)
     post_processing: Optional[Literal["bilateral_grid", "ppisp"]] = None
-    # Use fused implementation for bilateral grid (only applies when post_processing="bilateral_grid")
     bilateral_grid_fused: bool = False
-    # Shape of the bilateral grid (X, Y, W)
     bilateral_grid_shape: Tuple[int, int, int] = (16, 16, 8)
-    # Enable PPISP controller
     ppisp_use_controller: bool = True
-    # Use controller distillation in PPISP (only applies when post_processing="ppisp" and ppisp_use_controller=True)
     ppisp_controller_distillation: bool = True
-    # Controller activation ratio for PPISP (only applies when post_processing="ppisp" and ppisp_use_controller=True)
     ppisp_controller_activation_num_steps: int = 25_000
-    # Color correction method for cc_* metrics (only applies when post_processing is set)
     color_correct_method: Literal["affine", "quadratic"] = "affine"
-    # Compute color-corrected metrics (cc_psnr, cc_ssim, cc_lpips) during evaluation
     use_color_correction_metric: bool = False
 
-    # Enable depth loss. (experimental)
     depth_loss: bool = False
-    # Weight for depth loss
     depth_lambda: float = 1e-2
 
-    # Dump information to tensorboard every this steps
     tb_every: int = 100
-    # Save training images to tensorboard
     tb_save_image: bool = False
 
     lpips_net: Literal["vgg", "alex"] = "alex"
 
-    # 3DGUT (uncented transform + eval 3D)
     with_ut: bool = False
     with_eval3d: bool = False
 
@@ -316,27 +428,25 @@ def create_splats_with_optimizers(
         points = torch.from_numpy(parser.points).float()
         rgbs = torch.from_numpy(parser.points_rgb / 255.0).float()
     elif init_type == "random":
+        # points = init_extent * scene_scale * torch.randn((init_num_pts, 3))
         points = init_extent * scene_scale * (torch.rand((init_num_pts, 3)) * 2 - 1)
         rgbs = torch.rand((init_num_pts, 3))
     else:
         raise ValueError("Please specify a correct init_type: sfm or random")
 
-    # Initialize the GS size to be the average dist of the 3 nearest neighbors
-    dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
+    dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)
     dist_avg = torch.sqrt(dist2_avg)
-    scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)  # [N, 3]
+    scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)
 
-    # Distribute the GSs to different ranks (also works for single rank)
     points = points[world_rank::world_size]
     rgbs = rgbs[world_rank::world_size]
     scales = scales[world_rank::world_size]
 
     N = points.shape[0]
-    quats = torch.rand((N, 4))  # [N, 4]
-    opacities = torch.logit(torch.full((N,), init_opacity))  # [N,]
+    quats = torch.rand((N, 4))
+    opacities = torch.logit(torch.full((N,), init_opacity))
 
     params = [
-        # name, value, lr
         ("means", torch.nn.Parameter(points), means_lr * scene_scale),
         ("scales", torch.nn.Parameter(scales), scales_lr),
         ("quats", torch.nn.Parameter(quats), quats_lr),
@@ -344,25 +454,20 @@ def create_splats_with_optimizers(
     ]
 
     if feature_dim is None:
-        # color is SH coefficients.
-        colors = torch.zeros((N, (sh_degree + 1) ** 2, 3))  # [N, K, 3]
+        colors = torch.zeros((N, (sh_degree + 1) ** 2, 3))
         colors[:, 0, :] = rgb_to_sh(rgbs)
         params.append(("sh0", torch.nn.Parameter(colors[:, :1, :]), sh0_lr))
         params.append(("shN", torch.nn.Parameter(colors[:, 1:, :]), shN_lr))
     else:
-        # features will be used for appearance and view-dependent shading
-        features = torch.rand(N, feature_dim)  # [N, feature_dim]
+        features = torch.rand(N, feature_dim)
         params.append(("features", torch.nn.Parameter(features), sh0_lr))
-        colors = torch.logit(rgbs)  # [N, 3]
+        colors = torch.logit(rgbs)
         params.append(("colors", torch.nn.Parameter(colors), sh0_lr))
 
     splats = torch.nn.ParameterDict({n: v for n, v, _ in params}).to(device)
-    # Scale learning rate based on batch size, reference:
-    # https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
-    # Note that this would not make the training exactly equivalent, see
-    # https://arxiv.org/pdf/2402.18824v1
     BS = batch_size * world_size
     optimizer_class = None
+    # optimizer_class = torch.optim.AdamW
     if sparse_grad:
         optimizer_class = torch.optim.SparseAdam
     elif visible_adam:
@@ -373,7 +478,6 @@ def create_splats_with_optimizers(
         name: optimizer_class(
             [{"params": splats[name], "lr": lr * math.sqrt(BS), "name": name}],
             eps=1e-15 / math.sqrt(BS),
-            # TODO: check betas logic when BS is larger than 10 betas[0] will be zero.
             betas=(1 - BS * (1 - 0.9), 1 - BS * (1 - 0.999)),
             fused=True,
         )
@@ -396,10 +500,8 @@ class Runner:
         self.world_size = world_size
         self.device = f"cuda:{local_rank}"
 
-        # Where to dump results.
         os.makedirs(cfg.result_dir, exist_ok=True)
 
-        # Setup output directories.
         self.ckpt_dir = f"{cfg.result_dir}/ckpts"
         os.makedirs(self.ckpt_dir, exist_ok=True)
         self.stats_dir = f"{cfg.result_dir}/stats"
@@ -409,10 +511,8 @@ class Runner:
         self.ply_dir = f"{cfg.result_dir}/ply"
         os.makedirs(self.ply_dir, exist_ok=True)
 
-        # Tensorboard
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
-        # Load data: Training data should contain initial points and colors.
         self.parser = Parser(
             data_dir=cfg.data_dir,
             factor=cfg.data_factor,
@@ -428,7 +528,7 @@ class Runner:
         )
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
-        print("Scene scale:", self.scene_scale)
+        print("scene scale:", self.scene_scale)
 
         if self.parser.num_cameras > 1 and cfg.batch_size != 1:
             raise ValueError(
@@ -449,7 +549,6 @@ class Runner:
                 f"PPISP post-processing requires MCMCStrategy at the moment."
             )
 
-        # Model
         feature_dim = 32 if cfg.app_opt else None
         self.splats, self.optimizers = create_splats_with_optimizers(
             self.parser,
@@ -474,9 +573,8 @@ class Runner:
             world_rank=world_rank,
             world_size=world_size,
         )
-        print("Model initialized. Number of GS:", len(self.splats["means"]))
+        print("model initialized. number of gs:", len(self.splats["means"]))
 
-        # Densification Strategy
         self.cfg.strategy.check_sanity(self.splats, self.optimizers)
 
         if isinstance(self.cfg.strategy, DefaultStrategy):
@@ -488,7 +586,6 @@ class Runner:
         else:
             assert_never(self.cfg.strategy)
 
-        # Compression Strategy
         self.compression_method = None
         if cfg.compression is not None:
             if cfg.compression == "png":
@@ -522,7 +619,6 @@ class Runner:
             self.app_module = AppearanceOptModule(
                 len(self.trainset), feature_dim, cfg.app_embed_dim, cfg.sh_degree
             ).to(self.device)
-            # initialize the last layer to be zero so that the initial output is zero.
             torch.nn.init.zeros_(self.app_module.color_head[-1].weight)
             torch.nn.init.zeros_(self.app_module.color_head[-1].bias)
             self.app_optimizers = [
@@ -574,7 +670,6 @@ class Runner:
                 self.post_processing_module.create_optimizers()
             )
 
-        # Losses & Metrics.
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
         self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
 
@@ -583,14 +678,12 @@ class Runner:
                 net_type="alex", normalize=True
             ).to(self.device)
         elif cfg.lpips_net == "vgg":
-            # The 3DGS official repo uses lpips vgg, which is equivalent with the following:
             self.lpips = LearnedPerceptualImagePatchSimilarity(
                 net_type="vgg", normalize=False
             ).to(self.device)
         else:
             raise ValueError(f"Unknown LPIPS network: {cfg.lpips_net}")
 
-        # Viewer
         if not self.cfg.disable_viewer:
             self.server = viser.ViserServer(port=cfg.port, verbose=False)
             self.viewer = GsplatViewer(
@@ -600,8 +693,10 @@ class Runner:
                 mode="training",
             )
 
-        # Track if Gaussians are frozen (for controller distillation)
         self._gaussians_frozen = False
+
+        self._view_cull_masks: Dict[int, Tensor] = {}
+        self._view_cull_mask_steps: Dict[int, int] = {}
 
     def freeze_gaussians(self):
         """Freeze all Gaussian parameters for controller distillation.
@@ -616,14 +711,13 @@ class Runner:
             param.requires_grad = False
 
         self._gaussians_frozen = True
-        print("[Distillation] Gaussian parameters frozen")
+        print("distillation: gaussian parameters frozen")
 
-    # Frustum Culling from CLM paper
     @torch.no_grad()
     def frustum_cull(
         self,
-        camtoworlds: Tensor,  # [C, 4, 4]
-        Ks: Tensor,            # [C, 3, 3]
+        camtoworlds: Tensor,
+        Ks: Tensor,
         width: int,
         height: int,
         step: int,
@@ -636,49 +730,48 @@ class Runner:
         radius from the largest scale, and keep the Gaussian if the bounding
         circle overlaps the image for any camera in the batch.
         """
-        means = self.splats["means"]          # [N, 3]
-        scales = torch.exp(self.splats["scales"])  # [N, 3]
-        max_scale = scales.max(dim=-1).values  # [N]
+        means = self.splats["means"]
+        scales = torch.exp(self.splats["scales"])
+        max_scale = scales.max(dim=-1).values
 
-        # viewmats: [C, 4, 4]  (world-to-camera)
-        viewmats = torch.linalg.inv(camtoworlds)  # [C, 4, 4]
-        R = viewmats[:, :3, :3]  # [C, 3, 3]
-        t = viewmats[:, :3, 3]   # [C, 3]
+        viewmats = torch.linalg.inv(camtoworlds)
+        R = viewmats[:, :3, :3]
+        t = viewmats[:, :3, 3]
 
-        # p_cam: [C, N, 3]
-        p_cam = (R @ means.T).permute(0, 2, 1) + t.unsqueeze(1)  # [C, N, 3]
-        z = p_cam[..., 2]  # [C, N]
+        p_cam = (R @ means.T).permute(0, 2, 1) + t.unsqueeze(1)
+        z = p_cam[..., 2]
 
-        # Only consider Gaussians in front of the near plane
-        valid_depth = z > near_plane  # [C, N]
+        valid_depth = z > near_plane
 
-        # Project to image space
-        fx = Ks[:, 0, 0].unsqueeze(1)  # [C, 1]
+        fx = Ks[:, 0, 0].unsqueeze(1)
         fy = Ks[:, 1, 1].unsqueeze(1)
         cx = Ks[:, 0, 2].unsqueeze(1)
         cy = Ks[:, 1, 2].unsqueeze(1)
 
         z_safe = z.clamp(min=1e-6)
-        u = fx * p_cam[..., 0] / z_safe + cx  # [C, N]
-        v = fy * p_cam[..., 1] / z_safe + cy  # [C, N]
+        u = fx * p_cam[..., 0] / z_safe + cx
+        v = fy * p_cam[..., 1] / z_safe + cy
 
-        # Conservative pixel radius from the largest Gaussian axis
-        f_max = torch.max(fx, fy)  # [C, 1]
+        f_max = torch.max(fx, fy)
 
-        r =  1.5 * f_max * max_scale.unsqueeze(0) / z_safe  # [C, N]
+        radius_scale = max(self.cfg.frustum_cull_radius_scale, 0.0)
+        r = radius_scale * f_max * max_scale.unsqueeze(0) / z_safe
 
-        # Epsilon smoothing to handle Gaussians near Frustum edge 
-        e = 0.5 * max(width, height) if step < 10000 else 0.1 * max(width, height)
+        if step < self.cfg.frustum_cull_margin_switch_step:
+            margin_scale = self.cfg.frustum_cull_margin_early
+        else:
+            margin_scale = self.cfg.frustum_cull_margin_late
+        margin_scale = max(margin_scale, 0.0)
+        e = margin_scale * max(width, height)
         in_frustum = (
             valid_depth
             & (u + r > -e) 
             & (u - r < width + e)
             & (v + r > -e) 
             & (v - r < height + e)
-        )  # [C, N]
+        )
 
-        # Keep a Gaussian if it's in frustum for ANY camera
-        return in_frustum.any(dim=0)  # [N]
+        return in_frustum.any(dim=0)
 
     def rasterize_splats(
         self,
@@ -697,58 +790,60 @@ class Runner:
 
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
-        means = self.splats["means"]  # [N, 3]
-        # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
-        # rasterization does normalization internally
-        quats = self.splats["quats"]  # [N, 4]
-        scales = torch.exp(self.splats["scales"])  # [N, 3]
-        opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
-        image_ids = kwargs.pop("image_ids", None) 
-        if cull_mask is not None:
-            means = means[cull_mask]
-            quats = quats[cull_mask]
-            scales = scales[cull_mask]
-            opacities = opacities[cull_mask]
-    
-        # Check if image in cache before raster (from update)
+        means = self.splats["means"]
+        quats = self.splats["quats"]
+        scales = torch.exp(self.splats["scales"])
+        opacities = torch.sigmoid(self.splats["opacities"])
         image_ids = kwargs.pop("image_ids", None)
+
+        cull_idx = None
+        if cull_mask is not None:
+            cull_idx = cull_mask.nonzero(as_tuple=False).squeeze(1)
+            means_in = means[cull_idx]
+            quats_in = quats[cull_idx]
+            scales_in = scales[cull_idx]
+            opacities_in = opacities[cull_idx]
+        else:
+            means_in, quats_in, scales_in, opacities_in = means, quats, scales, opacities
+
         if external_buffers is not None:
-            # i.e. if in cache, use cache
             return (
                 external_buffers["render_colors"],
                 external_buffers["render_alphas"],
-                external_buffers["info"]
+                external_buffers["info"],
             )
 
-
         if self.cfg.app_opt:
-            features = self.splats["features"] if cull_mask is None else self.splats["features"][cull_mask]
-            splat_colors = self.splats["colors"] if cull_mask is None else self.splats["colors"][cull_mask]
             colors = self.app_module(
-                features=features,
+                features=self.splats["features"],
                 embed_ids=image_ids,
                 dirs=means[None, :, :] - camtoworlds[:, None, :3, 3],
                 sh_degree=kwargs.pop("sh_degree", self.cfg.sh_degree),
             )
-            colors = colors + splat_colors
+            colors = colors + self.splats["colors"]
             colors = torch.sigmoid(colors)
+            if cull_idx is not None:
+                colors = colors[cull_idx]
         else:
-            sh0 = self.splats["sh0"] if cull_mask is None else self.splats["sh0"][cull_mask]
-            shN = self.splats["shN"] if cull_mask is None else self.splats["shN"][cull_mask]
-            colors = torch.cat([sh0, shN], 1)  # [N, K, 3]
+            if cull_idx is not None:
+                sh0_in = self.splats["sh0"][cull_idx]
+                shN_in = self.splats["shN"][cull_idx]
+                colors = torch.cat([sh0_in, shN_in], 1)
+            else:
+                colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)
 
         if rasterize_mode is None:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         if camera_model is None:
             camera_model = self.cfg.camera_model
         render_colors, render_alphas, info = rasterization(
-            means=means,
-            quats=quats,
-            scales=scales,
-            opacities=opacities,
+            means=means_in,
+            quats=quats_in,
+            scales=scales_in,
+            opacities=opacities_in,
             colors=colors,
-            viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
-            Ks=Ks,  # [C, 3, 3]
+            viewmats=torch.linalg.inv(camtoworlds),
+            Ks=Ks,
             width=width,
             height=height,
             packed=self.cfg.packed,
@@ -760,24 +855,26 @@ class Runner:
             sparse_grad=self.cfg.sparse_grad,
             rasterize_mode=rasterize_mode,
             distributed=self.world_size > 1,
-            camera_model=self.cfg.camera_model,
+            camera_model=camera_model,
             with_ut=self.cfg.with_ut,
             with_eval3d=self.cfg.with_eval3d,
             **kwargs,
         )
+
+        if cull_idx is not None:
+            info["global_gaussian_ids"] = cull_idx
+
         if masks is not None:
             render_colors[~masks] = 0
 
         if self.cfg.post_processing is not None:
-            # Create pixel coordinates [H, W, 2] with +0.5 center offset
             pixel_y, pixel_x = torch.meshgrid(
                 torch.arange(height, device=self.device) + 0.5,
                 torch.arange(width, device=self.device) + 0.5,
                 indexing="ij",
             )
-            pixel_coords = torch.stack([pixel_x, pixel_y], dim=-1)  # [H, W, 2]
+            pixel_coords = torch.stack([pixel_x, pixel_y], dim=-1)
 
-            # Split RGB from extra channels (e.g. depth) for post-processing
             rgb = render_colors[..., :3]
             extra = render_colors[..., 3:] if render_colors.shape[-1] > 3 else None
 
@@ -810,12 +907,9 @@ class Runner:
 
         return render_colors, render_alphas, info
 
-    # Helper to handle raster calls
     def prepare_rasterization_buffers(self, step, camtoworlds, Ks, width, height, image_ids, camera_idcs, exposure, masks):
-        # Determine SH degree for this specific step
         sh_degree_to_use = min(step // self.cfg.sh_degree_interval, self.cfg.sh_degree)
     
-        # Generate the buffers
         renders, alphas, info = self.rasterize_splats(
             camtoworlds=camtoworlds,
             Ks=Ks,
@@ -831,25 +925,35 @@ class Runner:
             exposure=exposure,
         )
 
-        # Return keys that match the internal rasterizer's expectations
         return {
             "info": {k: v.detach() if isinstance(v, torch.Tensor) else v for k, v in info.items()},
             "render_colors": renders.detach(),
             "render_alphas": alphas.detach()
         }
 
-    # Custom trainer method to improve runtime and VRAM usage over base NerfStudios gsplat trainer
     def train(self):
         cfg = self.cfg
         device = self.device
         world_rank = self.world_rank
         world_size = self.world_size
-    
-        # Setup Cache
-        if not hasattr(self, 'cache_manager'):
-            self.cache_manager = GSCacheManager(vram_thresh_gb=18.5)
 
-        # 1. Dump Config (From Gsplat) ------------------------------------
+        cacheMode = cfg.cache_mode
+        if cacheMode == "none" and cfg.enable_input_cache:
+            cacheMode = "lru"
+        cache_enabled = cacheMode != "none"
+        prefetch_lookahead = max(int(cfg.prefetch_lookahead), 0)
+        prefetch_enabled = (
+            cache_enabled and cfg.enable_prefetch and prefetch_lookahead > 0
+        )
+        cache_manager: Optional[BaseGPUCacheManager] = None
+        if cache_enabled:
+            cache_manager = createGpuCacheManager(
+                cache_mode=cacheMode,
+                vram_thresh_gb=cfg.vram_thresh_gb,
+                twoq_a1_ratio=cfg.twoq_a1_ratio,
+            )
+            self.cache_manager = cache_manager
+
         if world_rank == 0:
             with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
                 yaml.dump(vars(cfg), f)
@@ -858,21 +962,17 @@ class Runner:
         init_step = 0
         
         schedulers = [
-            # means has a learning rate schedule, that end at 0.01 of the initial value
             torch.optim.lr_scheduler.ExponentialLR(
                 self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
             ),
         ]
         if cfg.pose_opt:
-            # pose optimization has a learning rate schedule
             schedulers.append(
                 torch.optim.lr_scheduler.ExponentialLR(
                     self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
                 )
             )
-        # Post-processing module has a learning rate schedule
         if cfg.post_processing == "bilateral_grid":
-            # Linear warmup + exponential decay
             schedulers.append(
                 torch.optim.lr_scheduler.ChainedScheduler(
                     [
@@ -894,9 +994,7 @@ class Runner:
                 max_optimization_iters=max_steps,
             )
             schedulers.extend(ppisp_schedulers)
-        # End cfg setup/dump (from gsplat) ------------------------------------
 
-        # 2. Data Loader Setup (from gsplat) ----------------------------------
         trainloader = torch.utils.data.DataLoader(
             self.trainset, 
             batch_size=cfg.batch_size, 
@@ -906,25 +1004,88 @@ class Runner:
             pin_memory=True,
         )
         trainloader_iter = iter(trainloader)
-        # End Data Loader (from gsplat) ---------------------------------------
 
-        # 3. Profiling Setup with nsys 
         profile_start, profile_stop = 0, max_steps + 1
 
-         # Set optimizer stride from cfg 
-        # Sets how many steps optimizer acummulates gradients before updating learned parameters
-        # Higher stride somewhat reduces runtime, but has PSNR cost
         optimizer_stride = cfg.optimizer_stride
 
-        # Training Loop
         global_tic = time.time()
         pbar = tqdm.tqdm(range(init_step, max_steps))
+        _last_loss: float = 0.0
+        _prefetch_events: dict = {}
+        def _next_train_batch():
+            nonlocal trainloader_iter
+            try:
+                return next(trainloader_iter)
+            except StopIteration:
+                trainloader_iter = iter(trainloader)
+                return next(trainloader_iter)
+
+        def _to_device_batch(batch):
+            return {
+                "pixels": batch["image"].to(device, non_blocking=True).to(torch.uint8), # keep uint8 in cache for less mem
+                "camtoworlds": batch["camtoworld"].to(device, non_blocking=True),
+                "Ks": batch["K"].to(device, non_blocking=True),
+                "image_ids": batch["image_id"].to(device, non_blocking=True),
+                "camera_idcs": batch["camera_idx"].to(device, non_blocking=True),
+                "masks": (
+                    batch["mask"].to(device, non_blocking=True)
+                    if batch.get("mask") is not None
+                    else None
+                ),
+                "exposure": (
+                    batch["exposure"].to(device, non_blocking=True)
+                    if "exposure" in batch
+                    else None
+                ),
+                "points": (
+                    batch["points"].to(device, non_blocking=True)
+                    if cfg.depth_loss
+                    else None
+                ),
+                "depths_gt": (
+                    batch["depths"].to(device, non_blocking=True)
+                    if cfg.depth_loss
+                    else None
+                ),
+            }
+
+        queue_target = 1 + (prefetch_lookahead if prefetch_enabled else 0)
+        data_queue = deque()
+
+        def _fill_data_queue():
+            while len(data_queue) < queue_target:
+                data_queue.append(_next_train_batch())
+
+        if cacheMode == "warm_all" and cache_manager is not None:
+            warm_loader = torch.utils.data.DataLoader(
+                self.trainset,
+                batch_size=cfg.batch_size,
+                shuffle=False,
+                num_workers=2,
+                persistent_workers=False,
+                pin_memory=True,
+            )
+            warm_iter = tqdm.tqdm(
+                warm_loader,
+                desc="Warm GPU cache",
+                disable=world_rank != 0,
+            )
+            for warm_data in warm_iter:
+                warm_view_id = int(warm_data["image_id"][0].item())
+                cache_manager.prefetch(
+                    warm_view_id,
+                    lambda batch=warm_data: _to_device_batch(batch),
+                )
+            torch.cuda.current_stream().wait_stream(cache_manager.transfer_stream)
+
+
+        _fill_data_queue()
+
         for step in pbar:
-            # Start nsys profiler
             if step == profile_start:
                 profiler.start()
 
-            # Freeze Gaussians when PPISP controller distillation starts
             if (
                 cfg.post_processing == "ppisp"
                 and cfg.ppisp_use_controller
@@ -933,88 +1094,116 @@ class Runner:
             ):
                 self.freeze_gaussians()
 
-            # NTVX step counter
             nvtx.range_push(f"Iteration_{step}")
-    
-            # NTVX Range 1: Data Loading
+
             nvtx.range_push("Data_Loading")
-            # gplsat data loader (start) --------------------------------------
-            try:
-                data = next(trainloader_iter)
-            except StopIteration:
-                trainloader_iter = iter(trainloader)
-                data = next(trainloader_iter)
-            # gplsat data loadeir (end) ---------------------------------------
-            
-            view_id = data["image_id"][0].item()
+            data = data_queue.popleft()
+            _fill_data_queue()
+
+            view_id = int(data["image_id"][0].item())
 
 
-            # Cache raw image inputs or load if cache disabled
-            def _load_data():
-                return {
-                    "pixels": data["image"].to(device) / 255.0,
-                    "camtoworlds": data["camtoworld"].to(device),
-                    "Ks": data["K"].to(device),
-                    "image_ids": data["image_id"].to(device),
-                    "camera_idcs": data["camera_idx"].to(device),
-                    "masks": data.get("mask").to(device) if data.get("mask") is not None else None,
-                    "exposure": data.get("exposure").to(device) if "exposure" in data else None,
-                }
-            if cfg.enable_input_cache:
-                cached_data = self.cache_manager.get_cache(view_id, _load_data)
+            def _load_data(batch=data):
+                return _to_device_batch(batch)
+
+            if cache_manager is not None:
+                cached_data = cache_manager.get_cache(view_id, _load_data)
             else:
                 cached_data = _load_data()
             
-            # Fetch inputs from cache
-            # Same parameters as gsplat
-            pixels = cached_data["pixels"] # [ 1, H, W, 3 ]
-            camtoworlds = cached_data["camtoworlds"] # [ 1, 4, 4 ]
-            Ks = cached_data["Ks"] # [ 1, 3, 3 ]
+            pixels = cached_data["pixels"]
+            if pixels.dtype == torch.uint8:
+                pixels = pixels.float() / 255.0
+            else:
+                pixels = pixels.float()
+            camtoworlds = cached_data["camtoworlds"]
+            Ks = cached_data["Ks"]
             image_ids = cached_data["image_ids"]
             camera_idcs = cached_data["camera_idcs"]
-            masks = cached_data["masks"] # [ 1, H, W ]
-            exposure = cached_data["exposure"] # [ B, ]
+            masks = cached_data["masks"]
+            exposure = cached_data["exposure"]
 
-            # Loss not cached
             if cfg.depth_loss:
-                points = data["points"].to(device) # [
-                depths_gt = data["depths"].to(device)
+                points = cached_data["points"]
+                depths_gt = cached_data["depths_gt"]
 
             height, width = pixels.shape[1:3]
 
 
-            # gsplat perturb/adjust  ------------------------------------------
             camtoworlds_gt = camtoworlds
             if cfg.pose_noise:
                 camtoworlds = self.pose_perturb(camtoworlds, image_ids)
             if cfg.pose_opt:
                 camtoworlds = self.pose_adjust(camtoworlds, image_ids)
 
-            torch.cuda.current_stream().wait_stream(self.cache_manager.transfer_stream)
+            if cache_manager is not None:
+                evt = _prefetch_events.pop(view_id, None)
+                if evt is not None:
+                    evt.wait()
+
+            if cache_manager is not None and prefetch_enabled:
+                prefetched_this_step = 0
+                queued_view_ids = set()
+                # max_prefetch_per_step = 2
+                max_prefetch_per_step = 1
+                for _nd in islice(data_queue, prefetch_lookahead):
+                    next_view_id = int(_nd["image_id"][0].item())
+                    if next_view_id == view_id:
+                        continue
+                    if next_view_id in queued_view_ids:
+                        continue
+                    queued_view_ids.add(next_view_id)
+                    if next_view_id in _prefetch_events:
+                        continue
+                    if cache_manager.has_view(next_view_id):
+                        continue
+                    # this is a tiny guard becuase churn gets bad fast
+                    enqueued = cache_manager.prefetch(
+                        next_view_id,
+                        lambda batch=_nd: _to_device_batch(batch),
+                    )
+                    if not enqueued:
+                        continue
+                    _evt = torch.cuda.Event()
+                    _evt.record(cache_manager.transfer_stream)
+                    _prefetch_events[next_view_id] = _evt
+                    prefetched_this_step += 1
+                    if prefetched_this_step >= max_prefetch_per_step:
+                        break
+
             nvtx.range_pop()
 
-            # Forward Pass: always uses new inputs
             nvtx.range_push("Forward_Rasterize")
             sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
 
             WARMUP_STEPS = 4000
-            use_culling = cfg.enable_frustum_culling if step > WARMUP_STEPS else False
+            culling_start_step = WARMUP_STEPS
+            if isinstance(cfg.strategy, DefaultStrategy):
+                culling_start_step = max(culling_start_step, cfg.strategy.refine_stop_iter)
+            use_culling = cfg.enable_frustum_culling and (step >= culling_start_step)
 
-            # Pre-rendering frustum culling (CLM paper §5.1): drop Gaussians
-            # that are outside the view frustum before rasterization
             if use_culling:
-                cull_mask = self.frustum_cull(
-                    camtoworlds=camtoworlds,
-                    Ks=Ks,
-                    width=width,
-                    height=height,
-                    step=step,
-                    near_plane=cfg.near_plane,
+                recalc_interval = max(int(cfg.frustum_cull_interval), 1)
+                last_mask_step = self._view_cull_mask_steps.get(view_id, -10**9)
+                needs_recompute = (
+                    view_id not in self._view_cull_masks
+                    or (step - last_mask_step) >= recalc_interval
                 )
+                if needs_recompute:
+                    self._view_cull_masks[view_id] = self.frustum_cull(
+                        camtoworlds=camtoworlds,
+                        Ks=Ks,
+                        width=width,
+                        height=height,
+                        step=step,
+                        near_plane=cfg.near_plane,
+                    )
+                    self._view_cull_mask_steps[view_id] = step
+                cull_mask = self._view_cull_masks[view_id]
             else:
                 cull_mask = None
 
-            # We call this fresh so 'info' has active gradients for densification
+
             renders, alphas, info = self.rasterize_splats(
                 camtoworlds=camtoworlds,
                 Ks=Ks,
@@ -1026,12 +1215,12 @@ class Runner:
                 image_ids=image_ids,
                 render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                 masks=masks,
+                frame_idcs=image_ids,
                 camera_idcs=camera_idcs,
                 exposure=exposure,
                 external_buffers=None, 
                 cull_mask=cull_mask,
             )
-            
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
             else:
@@ -1043,7 +1232,6 @@ class Runner:
 
             nvtx.range_pop()
 
-            # Pre backward (basically just setup)
             nvtx.range_push("Strategy_Pre_Backward")
             self.cfg.strategy.step_pre_backward(
                 params=self.splats, optimizers=self.optimizers,
@@ -1051,26 +1239,22 @@ class Runner:
             )
             nvtx.range_pop()
     
-            # Loss calculations and backward calculations
-            # Largely taken from gsplat impl + cache updates
             nvtx.range_push("Loss_and_Backward")
             l1loss = F.l1_loss(colors, pixels)
             ssimloss = 1.0 - fused_ssim(colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2))
-            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda # mix both so it can calcualte smoother updates
             if cfg.depth_loss:
-                # query depths from depth map
                 points_ndc = torch.stack(
                     [
                         points[:, :, 0] / (width - 1) * 2 - 1,
                         points[:, :, 1] / (height - 1) * 2 - 1,
                     ],
                     dim=-1,
-                ) # Normalized to [-1, -1]
-                grid = points_ndc.unsqueeze(2)  # [1, M, 1, 2]
+                )
+                grid = points_ndc.unsqueeze(2)
                 depths_sampled = F.grid_sample(
                     depths.permute(0, 3, 1, 2), grid, align_corners=True
-                ) # [1, 1, M, 1]
-                # Calculate loss in disparity space
+                )
                 depths_sampled = depths_sampled.squeeze(3).squeeze(1)
                 disp = torch.where(
                     depths_sampled > 0.0,
@@ -1090,45 +1274,41 @@ class Runner:
                     self.post_processing_module.get_regularization_loss()
                 )
                 loss += post_processing_reg_loss
-            # Regularizations
             if cfg.opacity_reg > 0.0:
                 loss += cfg.opacity_reg * torch.sigmoid(self.splats["opacities"]).mean()
             if cfg.scale_reg > 0.0:
                 loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
 
-            # Call backward
             (loss / optimizer_stride).backward()
             nvtx.range_pop()
 
-            # Loss update 
-            desc = f"loss={loss.item():.3f}| sh degree={sh_degree_to_use}| "
+            if step % 10 == 0:
+                _last_loss = loss.item()
+            desc = f"loss={_last_loss:.3f}| sh degree={sh_degree_to_use}| " # keep pbar text short
             if cfg.depth_loss:
                 desc += f"depth loss={depthloss.item():.6f}| "
             if cfg.pose_opt and cfg.pose_noise:
-                # monitor the pos error if we inject noise
                 pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
                 desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
-    
-             # Post backward
+
             nvtx.range_push("Strategy_Post_Backward")
          
-            # Denisfication strategy
             base_thresh = 0.0002
-
-            if hasattr(cfg.strategy, "densify_grad_thresh"):
+            previous_grow_grad2d = None
+            if isinstance(cfg.strategy, DefaultStrategy):
+                previous_grow_grad2d = cfg.strategy.grow_grad2d
                 if step < WARMUP_STEPS:
-                    cfg.strategy.densify_grad_thresh = base_thresh * 0.5
+                    cfg.strategy.grow_grad2d = base_thresh * 0.5
                 else:
-                    cfg.strategy.densify_grad_thresh = base_thresh
-            else:
-                pass
+                    cfg.strategy.grow_grad2d = base_thresh
 
             if optimizer_stride > 1:
                 for v in info.values():
                     if isinstance(v, torch.Tensor) and v.grad is not None:
                         v.grad.mul_(optimizer_stride)
 
+            n_gaussians_before = len(self.splats["means"])
             cfg.strategy.step_post_backward(
                 params=self.splats,
                 optimizers=self.optimizers,
@@ -1137,11 +1317,19 @@ class Runner:
                 info=info,
                 packed=cfg.packed,
             )
+            if len(self.splats["means"]) != n_gaussians_before:
+                self._view_cull_masks.clear()
+                self._view_cull_mask_steps.clear()
 
-            cfg.strategy.densify_grad_threshold = base_thresh 
+            if optimizer_stride > 1:
+                for v in info.values():
+                    if isinstance(v, torch.Tensor) and v.grad is not None:
+                        v.grad.zero_()
+
+            if previous_grow_grad2d is not None:
+                cfg.strategy.grow_grad2d = previous_grow_grad2d
             nvtx.range_pop()
 
-            # Optimizer update with stride
             if (step+1) % optimizer_stride == 0:
                 nvtx.range_push("Optimizer_Update")
                 for optimizer in self.optimizers.values():
@@ -1151,23 +1339,21 @@ class Runner:
                     scheduler.step()
                 nvtx.range_pop()
     
-            # End of per step ntvx logging
             nvtx.range_pop()
 
-            # Gsplat writer --------------------------------------------------------- 
             if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
-                self.writer.add_scalar("train/loss", loss.item(), step)
-                self.writer.add_scalar("train/l1loss", l1loss.item(), step)
-                self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
+                self.writer.add_scalar("train/loss", loss.detach(), step)
+                self.writer.add_scalar("train/l1loss", l1loss.detach(), step)
+                self.writer.add_scalar("train/ssimloss", ssimloss.detach(), step)
                 self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
                 self.writer.add_scalar("train/mem", mem, step)
                 if cfg.depth_loss:
-                    self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+                    self.writer.add_scalar("train/depthloss", depthloss.detach(), step)
                 if cfg.post_processing is not None:
                     self.writer.add_scalar(
                         "train/post_processing_reg_loss",
-                        post_processing_reg_loss.item(),
+                        post_processing_reg_loss.detach(),
                         step,
                     )
                 if cfg.tb_save_image:
@@ -1176,7 +1362,6 @@ class Runner:
                     self.writer.add_image("train/render", canvas, step)
                 self.writer.flush()
 
-            # save checkpoint before updating the model
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 stats = {
@@ -1184,7 +1369,7 @@ class Runner:
                     "ellipse_time": time.time() - global_tic,
                     "num_GS": len(self.splats["means"]),
                 }
-                print("Step: ", step, stats)
+                print("step:", step, stats)
                 with open(
                     f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
                     "w",
@@ -1239,16 +1424,15 @@ class Runner:
                     save_to=f"{self.ply_dir}/point_cloud_{step}.ply",
                 )
 
-            # Stop Profiler and break early (less profiling overhead)
             if step == profile_stop:
                 profiler.stop()
-                print(f"Profiling complete. Captured steps {profile_start} to {profile_stop}.")
+                print(f"profiling complete. captured steps {profile_start} to {profile_stop}.")
                 break
     
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
         """Entry for evaluation."""
-        print("Running evaluation...")
+        print("running evaluation...")
         cfg = self.cfg
         device = self.device
         world_rank = self.world_rank
@@ -1266,7 +1450,6 @@ class Runner:
             masks = data["mask"].to(device) if "mask" in data else None
             height, width = pixels.shape[1:3]
 
-            # Exposure metadata is available for any image with EXIF data (train or val)
             exposure = data["exposure"].to(device) if "exposure" in data else None
 
             torch.cuda.synchronize()
@@ -1280,10 +1463,10 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 masks=masks,
-                frame_idcs=None,  # For novel views, pass None (no per-frame parameters available)
+                frame_idcs=None,
                 camera_idcs=data["camera_idx"].to(device),
                 exposure=exposure,
-            )  # [1, H, W, 3]
+            )
             torch.cuda.synchronize()
             ellipse_time += max(time.time() - tic, 1e-10)
 
@@ -1291,7 +1474,6 @@ class Runner:
             canvas_list = [pixels, colors]
 
             if world_rank == 0:
-                # write images
                 canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
                 canvas = (canvas * 255).astype(np.uint8)
                 imageio.imwrite(
@@ -1299,18 +1481,17 @@ class Runner:
                     canvas,
                 )
 
-                pixels_p = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
-                colors_p = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                pixels_p = pixels.permute(0, 3, 1, 2)
+                colors_p = colors.permute(0, 3, 1, 2)
                 metrics["psnr"].append(self.psnr(colors_p, pixels_p))
                 metrics["ssim"].append(self.ssim(colors_p, pixels_p))
                 metrics["lpips"].append(self.lpips(colors_p, pixels_p))
-                # Compute color-corrected metrics for fair comparison across methods
                 if cfg.use_color_correction_metric:
                     if cfg.color_correct_method == "affine":
                         cc_colors = color_correct_affine(colors, pixels)
                     else:
                         cc_colors = color_correct_quadratic(colors, pixels)
-                    cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
+                    cc_colors_p = cc_colors.permute(0, 3, 1, 2)
                     metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
                     metrics["cc_ssim"].append(self.ssim(cc_colors_p, pixels_p))
                     metrics["cc_lpips"].append(self.lpips(cc_colors_p, pixels_p))
@@ -1327,21 +1508,19 @@ class Runner:
             )
             if cfg.use_color_correction_metric:
                 print(
-                    f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
-                    f"CC_PSNR: {stats['cc_psnr']:.3f}, CC_SSIM: {stats['cc_ssim']:.4f}, CC_LPIPS: {stats['cc_lpips']:.3f} "
-                    f"Time: {stats['ellipse_time']:.3f}s/image "
-                    f"Number of GS: {stats['num_GS']}"
+                    f"psnr: {stats['psnr']:.3f}, ssim: {stats['ssim']:.4f}, lpips: {stats['lpips']:.3f} "
+                    f"cc_psnr: {stats['cc_psnr']:.3f}, cc_ssim: {stats['cc_ssim']:.4f}, cc_lpips: {stats['cc_lpips']:.3f} "
+                    f"time: {stats['ellipse_time']:.3f}s/image "
+                    f"number of gs: {stats['num_GS']}"
                 )
             else:
                 print(
-                    f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
-                    f"Time: {stats['ellipse_time']:.3f}s/image "
-                    f"Number of GS: {stats['num_GS']}"
+                    f"psnr: {stats['psnr']:.3f}, ssim: {stats['ssim']:.4f}, lpips: {stats['lpips']:.3f} "
+                    f"time: {stats['ellipse_time']:.3f}s/image "
+                    f"number of gs: {stats['num_GS']}"
                 )
-            # save stats as json
             with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
                 json.dump(stats, f)
-            # save stats to tensorboard
             for k, v in stats.items():
                 self.writer.add_scalar(f"{stage}/{k}", v, step)
             self.writer.flush()
@@ -1351,7 +1530,7 @@ class Runner:
         """Entry for trajectory rendering."""
         if self.cfg.disable_video:
             return
-        print("Running trajectory rendering...")
+        print("running trajectory rendering...")
         cfg = self.cfg
         device = self.device
 
@@ -1359,12 +1538,12 @@ class Runner:
         if cfg.render_traj_path == "interp":
             camtoworlds_all = generate_interpolated_path(
                 camtoworlds_all, 1
-            )  # [N, 3, 4]
+            )
         elif cfg.render_traj_path == "ellipse":
             height = camtoworlds_all[:, 2, 3].mean()
             camtoworlds_all = generate_ellipse_path_z(
                 camtoworlds_all, height=height
-            )  # [N, 3, 4]
+            )
         elif cfg.render_traj_path == "spiral":
             camtoworlds_all = generate_spiral_path(
                 camtoworlds_all,
@@ -1384,13 +1563,12 @@ class Runner:
                 ),
             ],
             axis=1,
-        )  # [N, 4, 4]
+        )
 
         camtoworlds_all = torch.from_numpy(camtoworlds_all).float().to(device)
         K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
         width, height = list(self.parser.imsize_dict.values())[0]
 
-        # save to video
         video_dir = f"{cfg.result_dir}/videos"
         os.makedirs(video_dir, exist_ok=True)
         writer = imageio.get_writer(f"{video_dir}/traj_{step}.mp4", fps=30)
@@ -1407,39 +1585,34 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 render_mode="RGB+ED",
-            )  # [1, H, W, 4]
-            colors = torch.clamp(renders[..., 0:3], 0.0, 1.0)  # [1, H, W, 3]
-            depths = renders[..., 3:4]  # [1, H, W, 1]
+            )
+            colors = torch.clamp(renders[..., 0:3], 0.0, 1.0)
+            depths = renders[..., 3:4]
             depths = (depths - depths.min()) / (depths.max() - depths.min())
             canvas_list = [colors, depths.repeat(1, 1, 1, 3)]
 
-            # write images
             canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
             canvas = (canvas * 255).astype(np.uint8)
             writer.append_data(canvas)
         writer.close()
-        print(f"Video saved to {video_dir}/traj_{step}.mp4")
+        print(f"video saved to {video_dir}/traj_{step}.mp4")
 
     @torch.no_grad()
     def export_ppisp_reports(self) -> None:
         """Export PPISP visualization reports (PDF) and parameter JSON."""
         if self.cfg.post_processing != "ppisp":
             return
-        print("Exporting PPISP reports...")
+        print("exporting ppisp reports...")
 
-        # Compute frames per camera from training dataset
         num_cameras = self.parser.num_cameras
         frames_per_camera = [0] * num_cameras
         for idx in self.trainset.indices:
             cam_idx = self.parser.camera_indices[idx]
             frames_per_camera[cam_idx] += 1
 
-        # Generate camera names from COLMAP camera IDs
-        # camera_id_to_idx maps COLMAP ID -> 0-based index
         idx_to_camera_id = {v: k for k, v in self.parser.camera_id_to_idx.items()}
         camera_names = [f"camera_{idx_to_camera_id[i]}" for i in range(num_cameras)]
 
-        # Export reports
         output_dir = Path(self.cfg.result_dir) / "ppisp_reports"
         pdf_paths = export_ppisp_report(
             self.post_processing_module,
@@ -1447,14 +1620,14 @@ class Runner:
             output_dir,
             camera_names=camera_names,
         )
-        print(f"PPISP reports saved to {output_dir}")
+        print(f"ppisp reports saved to {output_dir}")
         for path in pdf_paths:
             print(f"  - {path.name}")
 
     @torch.no_grad()
     def run_compression(self, step: int):
         """Entry for running compression."""
-        print("Running compression...")
+        print("running compression...")
         world_rank = self.world_rank
 
         compress_dir = f"{cfg.result_dir}/compression/rank{world_rank}"
@@ -1462,7 +1635,6 @@ class Runner:
 
         self.compression_method.compress(compress_dir, self.splats)
 
-        # evaluate compression
         splats_c = self.compression_method.decompress(compress_dir)
         for k in splats_c.keys():
             self.splats[k].data = splats_c[k].to(self.device)
@@ -1506,16 +1678,14 @@ class Runner:
             render_mode=RENDER_MODE_MAP[render_tab_state.render_mode],
             rasterize_mode=render_tab_state.rasterize_mode,
             camera_model=render_tab_state.camera_model,
-        )  # [1, H, W, 3]
+        )
         render_tab_state.total_gs_count = len(self.splats["means"])
         render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()
 
         if render_tab_state.render_mode == "rgb":
-            # colors represented with sh are not guranteed to be in [0, 1]
             render_colors = render_colors[0, ..., 0:3].clamp(0, 1)
             renders = render_colors.cpu().numpy()
         elif render_tab_state.render_mode in ["depth(accumulated)", "depth(expected)"]:
-            # normalize depth to [0, 1]
             depth = render_colors[0, ..., 0:1]
             if render_tab_state.normalize_nearfar:
                 near_plane = render_tab_state.near_plane
@@ -1543,8 +1713,6 @@ class Runner:
 
 
 def main(local_rank: int, world_rank, world_size: int, cfg: Config):
-    # Import post-processing modules based on configuration
-    # These imports must be here (not in __main__) for distributed workers
     if cfg.post_processing == "bilateral_grid":
         global BilateralGrid, slice, total_variation_loss
         if cfg.bilateral_grid_fused:
@@ -1567,12 +1735,11 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
     if world_size > 1 and not cfg.disable_viewer:
         cfg.disable_viewer = True
         if world_rank == 0:
-            print("Viewer is disabled in distributed training.")
+            print("viewer is disabled in distributed training.")
 
     runner = Runner(local_rank, world_rank, world_size, cfg)
 
     if cfg.ckpt is not None:
-        # run eval only
         ckpts = [
             torch.load(file, map_location=runner.device, weights_only=True)
             for file in cfg.ckpt
@@ -1594,7 +1761,7 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
 
     if not cfg.disable_viewer:
         runner.viewer.complete()
-        print("Viewer running... Ctrl+C to exit.")
+        print("viewer running... ctrl+c to exit.")
         time.sleep(1000000)
 
 
@@ -1603,16 +1770,12 @@ if __name__ == "__main__":
     Usage:
 
     ```bash
-    # Single GPU training
     CUDA_VISIBLE_DEVICES=9 python -m examples.simple_trainer default
 
-    # Distributed training on 4 GPUs: Effectively 4x batch size so run 4x less steps.
     CUDA_VISIBLE_DEVICES=0,1,2,3 python simple_trainer.py default --steps_scaler 0.25
 
     """
 
-    # Config objects we can choose between.
-    # Each is a tuple of (CLI description, config object).
     configs = {
         "default": (
             "Gaussian splatting training using densification heuristics from the original paper.",
@@ -1634,7 +1797,6 @@ if __name__ == "__main__":
     cfg = tyro.extras.overridable_config_cli(configs)
     cfg.adjust_steps(cfg.steps_scaler)
 
-    # try import extra dependencies
     if cfg.compression == "png":
         try:
             import plas

@@ -11,7 +11,9 @@
 
 module purge
 module load cuda
-module load nsight-systems
+if ! module load nsight-systems 2>/dev/null; then
+    echo "WARNING: module 'nsight-systems' unavailable; trying existing nsys in PATH."
+fi
 
 nvidia-smi
 
@@ -34,6 +36,11 @@ source "$ENV_DIR/bin/activate"
 echo 'which python (after):'
 which python
 
+if ! command -v nsys >/dev/null 2>&1; then
+    echo "ERROR: nsys not found. Load a profiler module or install Nsight Systems in the env."
+    exit 1
+fi
+
 echo 'working in dir:'
 pwd
 
@@ -44,8 +51,13 @@ time nsys profile \
     --sample={sample} \
     --force-overwrite={force_overwrite} \
     --output={profile_output} \
+    --cuda-memory-usage=true \
     bash {script_path} \
     {scenes} \
     {profile_output} \
     {gpu_num} \
     {args}
+
+echo "Exporting SQLite for {profile_output}..."
+nsys export --type sqlite --force-overwrite true --output {profile_output}.sqlite {profile_output}.nsys-rep
+echo "SQLite export done."

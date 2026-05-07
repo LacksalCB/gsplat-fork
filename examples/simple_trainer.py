@@ -1,14 +1,24 @@
+# SPDX-FileCopyrightText: Copyright 2023-2026 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 import math
 import os
-
-# handle cache eviction clearing
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256"
-
-#Temp issue
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import time
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -42,39 +52,11 @@ from gsplat.compression import PngCompression
 from gsplat.distributed import cli
 from gsplat.optimizers import SelectiveAdam
 from gsplat.rendering import rasterization
+# from gsplat.cuda._wrapper import CameraModel
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
 
-import torch.cuda.profiler as profiler
-import torch.cuda.nvtx as nvtx
-
-# AI slop mockup
-class GSCacheManager:
-    def __init__(self, vram_thresh_gb=18.5):
-        self.limit = vram_thresh_gb * 1024 * 8
-        self.cache = {}
-
-        self.transfer_stream = torch.cuda.Stream()
-
-    def get_cache(self, view_id, compute_func):
-        if view_id in self.cache:
-            entry = self.cache[view_id]
-            # Move to main device using the transfer stream
-            with torch.cuda.stream(self.transfer_stream):
-                for k, v in entry.items():
-                    if isinstance(v, torch.Tensor):
-                        # non_blocking=True allows the CPU to keep running
-                        entry[k] = v.to("cuda", non_blocking=True)
-            return entry
-
-        new_entry = compute_func()
-        self.cache[view_id] = new_entry
-        return new_entry
-
-    def purge_all(self):
-        self.cache.clear()
-        torch.cuda.empty_cache()
 
 @dataclass
 class Config:
@@ -84,10 +66,12 @@ class Config:
     ckpt: Optional[List[str]] = None
     # Name of compression strategy to use
     compression: Optional[Literal["png"]] = None
-    # Render trajectory path
+    # Render trajectory path: "interp", "ellipse", "spiral", or "raw" (use captured poses as-is)
     render_traj_path: str = "interp"
 
-    # Path to the Mip-NeRF 360 dataset
+    # Dataset backend: "colmap" or "ncore"
+    data_type: str = "colmap"
+    # Path to the Mip-NeRF 360 dataset (colmap) or NCore v4 meta-JSON file (ncore)
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
     data_factor: int = 4
@@ -102,9 +86,28 @@ class Config:
     # Normalize the world space
     normalize_world_space: bool = True
     # Camera model
-    camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
+    camera_model: Literal["pinhole", "ortho", "fisheye", "ftheta"] = "pinhole"
     # Load EXIF exposure metadata from images (if available)
     load_exposure: bool = True
+
+    # --- NCore-specific options (only used when data_type="ncore") ---
+    # Camera sensor IDs to load (auto-detected from sequence if empty)
+    ncore_camera_ids: List[str] = field(default_factory=list)
+    # Point cloud source IDs to load -- accepts lidar, radar, or native point cloud
+    # source IDs (auto-detected from sequence if empty). Field name kept for backward compat.
+    ncore_lidar_ids: List[str] = field(default_factory=list)
+    # Temporal seek offset in seconds
+    ncore_seek_offset_sec: Optional[float] = None
+    # Clip duration in seconds (None = full sequence)
+    ncore_duration_sec: Optional[float] = None
+    # Maximum number of lidar init points
+    ncore_max_lidar_points: int = 500_000
+    # Generic-data key for lidar point RGB colors (fallback to gray if unavailable)
+    ncore_lidar_color_generic_data_name: str = "rgb"
+    # NCore component group names
+    ncore_poses_component_group: str = "default"
+    ncore_intrinsics_component_group: str = "default"
+    ncore_masks_component_group: str = "default"
 
     # Port for the viewer server
     port: int = 8080
@@ -282,14 +285,14 @@ def create_splats_with_optimizers(
     world_rank: int = 0,
     world_size: int = 1,
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
-    if init_type == "sfm":
+    if init_type == "sfm" or init_type == "lidar":
         points = torch.from_numpy(parser.points).float()
         rgbs = torch.from_numpy(parser.points_rgb / 255.0).float()
     elif init_type == "random":
         points = init_extent * scene_scale * (torch.rand((init_num_pts, 3)) * 2 - 1)
         rgbs = torch.rand((init_num_pts, 3))
     else:
-        raise ValueError("Please specify a correct init_type: sfm or random")
+        raise ValueError("Please specify a correct init_type: sfm, random, or lidar")
 
     # Initialize the GS size to be the average dist of the 3 nearest neighbors
     dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
@@ -383,20 +386,52 @@ class Runner:
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
         # Load data: Training data should contain initial points and colors.
-        self.parser = Parser(
-            data_dir=cfg.data_dir,
-            factor=cfg.data_factor,
-            normalize=cfg.normalize_world_space,
-            test_every=cfg.test_every,
-            load_exposure=cfg.load_exposure,
-        )
-        self.trainset = Dataset(
-            self.parser,
-            split="train",
-            patch_size=cfg.patch_size,
-            load_depths=cfg.depth_loss,
-        )
-        self.valset = Dataset(self.parser, split="val")
+        if cfg.data_type == "ncore":
+            from datasets.ncore import NCoreDataset, NCoreParser
+
+            self.parser = NCoreParser(
+                meta_json_path=cfg.data_dir,
+                factor=1.0 / cfg.data_factor if cfg.data_factor > 1 else 1.0,
+                test_every=cfg.test_every,
+                camera_ids=cfg.ncore_camera_ids or None,
+                lidar_ids=cfg.ncore_lidar_ids or None,
+                seek_offset_sec=cfg.ncore_seek_offset_sec,
+                duration_sec=cfg.ncore_duration_sec,
+                max_lidar_points=cfg.ncore_max_lidar_points,
+                lidar_color_generic_data_name=cfg.ncore_lidar_color_generic_data_name,
+                poses_component_group=cfg.ncore_poses_component_group,
+                intrinsics_component_group=cfg.ncore_intrinsics_component_group,
+                masks_component_group=cfg.ncore_masks_component_group,
+                normalize_world_space=cfg.normalize_world_space,
+            )
+            self.trainset = NCoreDataset(self.parser, split="train")
+            self.valset = NCoreDataset(self.parser, split="val")
+            self.ncore_camera_data = [
+                self.parser.camera_render_data[cam_id]
+                for cam_id in self.parser.camera_ids
+            ]
+            if (
+                any(d.camera_model == "ftheta" for d in self.ncore_camera_data)
+                and not cfg.with_eval3d
+            ):
+                print(
+                    "[NCore] Warning: FTheta cameras detected; pass --with-eval3d True for correct results."
+                )
+        else:
+            self.parser = Parser(
+                data_dir=cfg.data_dir,
+                factor=cfg.data_factor,
+                normalize=cfg.normalize_world_space,
+                test_every=cfg.test_every,
+                load_exposure=cfg.load_exposure,
+            )
+            self.trainset = Dataset(
+                self.parser,
+                split="train",
+                patch_size=cfg.patch_size,
+                load_depths=cfg.depth_loss,
+            )
+            self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
@@ -595,12 +630,11 @@ class Runner:
         width: int,
         height: int,
         masks: Optional[Tensor] = None,
-        rasterize_mode: Optional[Literal["classic", "antialiased"]] = None,
-        camera_model: Optional[Literal["pinhole", "ortho", "fisheye"]] = None,
+        rasterize_mode: Optional[str] = None,
+        camera_model = None,
         frame_idcs: Optional[Tensor] = None,
         camera_idcs: Optional[Tensor] = None,
         exposure: Optional[Tensor] = None,
-        external_buffers=None,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         means = self.splats["means"]  # [N, 3]
@@ -611,16 +645,6 @@ class Runner:
         opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
 
         image_ids = kwargs.pop("image_ids", None)
-        if external_buffers is not None:
-            # If we have a hit, we skip the GPU work and return the cached tensors.
-            # 'info' contains the binning/sorting data needed for the backward pass.
-            return (
-                external_buffers["render_colors"],
-                external_buffers["render_alphas"],
-                external_buffers["info"]
-            )
-
-
         if self.cfg.app_opt:
             colors = self.app_module(
                 features=self.splats["features"],
@@ -637,6 +661,33 @@ class Runner:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         if camera_model is None:
             camera_model = self.cfg.camera_model
+        ftheta_coeffs = None
+        radial_coeffs = None
+        tangential_coeffs = None
+        thin_prism_coeffs = None
+        with_ut = self.cfg.with_ut
+
+        if camera_idcs is not None and hasattr(self, "ncore_camera_data"):
+            cam = self.ncore_camera_data[camera_idcs.item()]
+            camera_model = cam.camera_model
+            ftheta_coeffs = cam.ftheta_coeffs
+            if cam.radial_coeffs is not None:
+                radial_coeffs = (
+                    torch.from_numpy(cam.radial_coeffs).to(means.device).unsqueeze(0)
+                )
+            if cam.tangential_coeffs is not None:
+                tangential_coeffs = (
+                    torch.from_numpy(cam.tangential_coeffs)
+                    .to(means.device)
+                    .unsqueeze(0)
+                )
+            if cam.thin_prism_coeffs is not None:
+                thin_prism_coeffs = (
+                    torch.from_numpy(cam.thin_prism_coeffs)
+                    .to(means.device)
+                    .unsqueeze(0)
+                )
+
         render_colors, render_alphas, info = rasterization(
             means=means,
             quats=quats,
@@ -656,9 +707,13 @@ class Runner:
             sparse_grad=self.cfg.sparse_grad,
             rasterize_mode=rasterize_mode,
             distributed=self.world_size > 1,
-            camera_model=self.cfg.camera_model,
-            with_ut=self.cfg.with_ut,
+            camera_model=camera_model,
+            with_ut=with_ut,
             with_eval3d=self.cfg.with_eval3d,
+            ftheta_coeffs=ftheta_coeffs,
+            radial_coeffs=radial_coeffs,
+            tangential_coeffs=tangential_coeffs,
+            thin_prism_coeffs=thin_prism_coeffs,
             **kwargs,
         )
         if masks is not None:
@@ -706,215 +761,6 @@ class Runner:
 
         return render_colors, render_alphas, info
 
-
-    def prepare_rasterization_buffers(self, step, camtoworlds, Ks, width, height, image_ids, camera_idcs, exposure, masks):
-        # Determine SH degree for this specific step
-        sh_degree_to_use = min(step // self.cfg.sh_degree_interval, self.cfg.sh_degree)
-    
-        # Generate the buffers
-        renders, alphas, info = self.rasterize_splats(
-            camtoworlds=camtoworlds,
-            Ks=Ks,
-            width=width,
-            height=height,
-            sh_degree=sh_degree_to_use,
-            near_plane=self.cfg.near_plane,
-            far_plane=self.cfg.far_plane,
-            image_ids=image_ids,
-            render_mode="RGB+ED" if self.cfg.depth_loss else "RGB",
-            masks=masks,
-            camera_idcs=camera_idcs,
-            exposure=exposure,
-            external_buffers=None # CRITICAL: Must be None to actually render!
-        )
-
-        # Return keys that match the internal rasterizer's expectations
-        return {
-            "info": {k: v.detach() if isinstance(v, torch.Tensor) else v for k, v in info.items()},
-            "render_colors": renders.detach(),
-            "render_alphas": alphas.detach()
-        }
-
-
-    def train(self):
-        cfg = self.cfg
-        device = self.device
-        world_rank = self.world_rank
-        world_size = self.world_size
-    
-        # Setup Cache
-        if not hasattr(self, 'cache_manager'):
-            self.cache_manager = GSCacheManager(vram_thresh_gb=18.5)
-
-        # 1. Setup Logging & Schedulers
-        if world_rank == 0:
-            with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
-                yaml.dump(vars(cfg), f)
-    
-        max_steps = cfg.max_steps
-        init_step = 0
-        
-        # Scheduling logic restored from original
-        schedulers = [
-            torch.optim.lr_scheduler.ExponentialLR(
-                self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
-            ),
-        ]
-        # ... (Include pose_opt/post_processing schedulers here as in original)
-    
-        # 2. Data Loader Setup
-        trainloader = torch.utils.data.DataLoader(
-            self.trainset, batch_size=cfg.batch_size, shuffle=True,
-            num_workers=4, persistent_workers=True, pin_memory=True,
-        )
-        trainloader_iter = iter(trainloader)
-    
-        # 3. Profiling Configuration
-        # Capture a 10-step window to keep .nsys-rep file size manageable
-        profile_start, profile_stop = 0, 30000
-        global_tic = time.time()
-        pbar = tqdm.tqdm(range(init_step, max_steps))
-   
-        optimizer_stride = 4
-
-        for step in pbar:
-            # Trigger Nsight Profiler API
-            if step == profile_start:
-                profiler.start()
-    
-            # START NVTX ITERATION BLOCK
-            nvtx.range_push(f"Iteration_{step}")
-    
-            nvtx.range_push("Data_Loading")
-            try:
-                data = next(trainloader_iter)
-            except StopIteration:
-                trainloader_iter = iter(trainloader)
-                data = next(trainloader_iter)
-            
-            view_id = data["image_id"][0].item()
-
-            # CACHE ONLY THE RAW INPUTS (Images, Cameras, Masks)
-            # This avoids slow Disk -> CPU -> GPU transfers on subsequent epochs
-            cached_data = self.cache_manager.get_cache(
-                view_id,
-                lambda: {
-                    "pixels": data["image"].to(device) / 255.0,
-                    "camtoworlds": data["camtoworld"].to(device),
-                    "Ks": data["K"].to(device),
-                    "image_ids": data["image_id"].to(device),
-                    "camera_idcs": data["camera_idx"].to(device),
-                    "masks": data.get("mask").to(device) if data.get("mask") is not None else None,
-                    "exposure": data.get("exposure").to(device) if "exposure" in data else None
-                }
-            )
-            
-            # Pull inputs from cache
-            pixels = cached_data["pixels"]
-            camtoworlds = cached_data["camtoworlds"]
-            Ks = cached_data["Ks"]
-            image_ids = cached_data["image_ids"]
-            camera_idcs = cached_data["camera_idcs"]
-            masks = cached_data["masks"]
-            exposure = cached_data["exposure"]
-
-            height, width = pixels.shape[1:3]
-            
-            torch.cuda.current_stream().wait_stream(self.cache_manager.transfer_stream)
-            nvtx.range_pop()
-
-            # --- FORWARD PASS (ALWAYS FRESH) ---
-            nvtx.range_push("Forward_Rasterize")
-            sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
-            
-            # We call this FRESH so 'info' has active gradients for densification
-            renders, alphas, info = self.rasterize_splats(
-                camtoworlds=camtoworlds,
-                Ks=Ks,
-                width=width,
-                height=height,
-                sh_degree=sh_degree_to_use,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                image_ids=image_ids,
-                render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                masks=masks,
-                camera_idcs=camera_idcs,
-                exposure=exposure,
-                external_buffers=None # NEVER use cached output buffers here
-            )
-            
-            colors = renders
-
-            nvtx.range_pop()
-    
-            # --- STRATEGY PRE-BACKWARD (Accumulate Stats) ---
-            nvtx.range_push("Strategy_Pre_Backward")
-            self.cfg.strategy.step_pre_backward(
-                params=self.splats, optimizers=self.optimizers,
-                state=self.strategy_state, step=step, info=info,
-            )
-            nvtx.range_pop()
-    
-            # --- LOSS & BACKWARD ---
-            nvtx.range_push("Loss_and_Backward")
-            l1loss = F.l1_loss(colors, pixels)
-            # Assuming fused_ssim is imported
-            ssimloss = 1.0 - fused_ssim(colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2))
-            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
-            lose = loss/optimizer_stride
-            
-            loss.backward()
-            nvtx.range_pop()
-    
-            # --- OPTIMIZER STEP ---
-            if (step+1) % optimizer_stride == 0:
-                nvtx.range_push("Optimizer_Update")
-                for optimizer in self.optimizers.values():
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                for scheduler in schedulers:
-                    scheduler.step()
-                nvtx.range_pop()
-                
-
-            # --- STRATEGY POST-BACKWARD (Densification/MCMC) ---
-            nvtx.range_push("Strategy_Post_Backward")
-        
-            strategy = cfg.strategy
-            is_refinement_step = (
-                step >= strategy.refine_start_iter and 
-                step <= strategy.refine_stop_iter and 
-                step % strategy.refine_every == 0
-            )
-            
-            if is_refinement_step:
-                current_count = self.splats['means'].shape[0]
-                
-                if current_count < 4_500_000:
-                    self.cache_manager.purge_all()
-                    
-                    strategy.step_post_backward(
-                        params=self.splats, 
-                        optimizers=self.optimizers,
-                        state=self.strategy_state, 
-                        step=step, 
-                        info=info, 
-                        packed=cfg.packed
-                    )
-
-            nvtx.range_pop()
-    
-            # END NVTX ITERATION BLOCK
-            nvtx.range_pop() 
-    
-            # Stop Profiler and break early for benchmark efficiency
-            if step == profile_stop:
-                profiler.stop()
-                print(f"Profiling complete. Captured steps {profile_start} to {profile_stop}.")
-                break
-    
-    """
     def train(self):
         cfg = self.cfg
         device = self.device
@@ -1062,11 +908,23 @@ class Runner:
             )
 
             # loss
-            l1loss = F.l1_loss(colors, pixels)
+            if masks is not None:
+                # Exclude masked pixels (e.g. ego vehicle) from L1.
+                # For SSIM (patch-based), zero out both sides at masked locations
+                # so masked patches don't pull colors toward an arbitrary value.
+                l1loss = F.l1_loss(colors[masks], pixels[masks])
+                colors_ssim = colors * masks[..., None]
+                pixels_ssim = pixels * masks[..., None]
+            else:
+                l1loss = F.l1_loss(colors, pixels)
+                colors_ssim = colors
+                pixels_ssim = pixels
             ssimloss = 1.0 - fused_ssim(
-                colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
+                colors_ssim.permute(0, 3, 1, 2),
+                pixels_ssim.permute(0, 3, 1, 2),
+                padding="valid",
             )
-            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+            loss = torch.lerp(l1loss, ssimloss, cfg.ssim_lambda)
             if cfg.depth_loss:
                 # query depths from depth map
                 points = torch.stack(
@@ -1296,9 +1154,7 @@ class Runner:
                 )
                 # Update the scene.
                 self.viewer.update(step, num_train_rays_per_step)
-    """
 
-    # comment
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
         """Entry for evaluation."""
